@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from collections.abc import Callable
 from datetime import date
@@ -69,6 +70,12 @@ def build_summary(
         )
         stats.extend(data_rows(result))
         if index < len(batches) - 1:
+            print(
+                f"WB stats: batch {index + 1}/{len(batches)} complete; "
+                "waiting 65s for API rate limit",
+                file=sys.stderr,
+                flush=True,
+            )
             sleep(65)
 
     spend = sum(as_float(item.get("sum")) for item in stats)

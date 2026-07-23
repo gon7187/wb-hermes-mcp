@@ -217,6 +217,32 @@ def test_today_summary_retries_a_retryable_rate_limit() -> None:
     assert sleeps == [65]
 
 
+def test_today_summary_reports_rate_limit_wait(capsys) -> None:
+    client = FakeClient(
+        {
+            "wb_list_campaigns": [
+                {
+                    "adverts": [
+                        {"id": campaign_id, "settings": {"name": str(campaign_id)}}
+                        for campaign_id in range(1, 52)
+                    ]
+                }
+            ],
+            "wb_get_campaign_stats": [{"data": []}, {"data": []}],
+        }
+    )
+
+    wb_adv_today_live.build_summary(
+        client,
+        target_date=date(2026, 7, 23),
+        sleep=lambda _: None,
+    )
+
+    assert capsys.readouterr().err == (
+        "WB stats: batch 1/2 complete; waiting 65s for API rate limit\n"
+    )
+
+
 def test_stats_cache_retries_a_retryable_rate_limit(tmp_path: Path) -> None:
     client = RateLimitedStatsClient(
         {
