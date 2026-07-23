@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from collections.abc import Mapping
-from typing import Literal, Protocol, cast
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, cast
 
+from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import (
@@ -16,6 +20,7 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    ValidationError,
     model_validator,
 )
 
@@ -295,17 +300,6 @@ class OrdersPayload(PayloadModel):
         return self
 
 
-class OrderDetailsPayload(PayloadModel):
-    order_id: StrictInt | None = Field(
-        default=None,
-        description=(
-            "ID сборочного задания. SDK не имеет безопасного GET по одному ID; "
-            "передача ID вернёт подсказку использовать wb_list_orders."
-        ),
-        examples=[12345678],
-    )
-
-
 class OrderStickersPayload(PayloadModel):
     sticker_type: Literal["png", "svg", "zplv", "zplh"] = Field(
         alias="type",
@@ -573,11 +567,11 @@ class ManageWarehousePayload(PayloadModel):
         return self
 
 
-class UpdateOrderStatusPayload(PayloadModel):
+class OrderStatusesPayload(PayloadModel):
     order_ids: list[StrictInt] = Field(
         min_length=1,
         max_length=1000,
-        description="ID FBS сборочных заданий для перевода статуса.",
+        description="ID FBS сборочных заданий для получения их текущих статусов.",
         examples=[[12345678]],
     )
 
@@ -628,6 +622,13 @@ class UpdateSupplyPayload(PayloadModel):
         return self
 
 
+class ApplyChangeInput(PayloadModel):
+    confirmation_id: StrictStr = Field(
+        description="Одноразовый ID подтверждаемого плана.",
+        examples=["f0f4b2d2-6b4b-4cc4-8df2-f8bd8416dc3a"],
+    )
+
+
 READ_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -642,9 +643,212 @@ PLAN_ANNOTATIONS = ToolAnnotations(
 )
 APPLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
+    destructiveHint=True,
     idempotentHint=False,
     openWorldHint=True,
 )
+
+
+_VALIDATION_MESSAGE = (
+    "Некорректные параметры инструмента. Проверьте структуру и обязательные поля."
+)
+_SECRET_KEY_PATTERN = re.compile(
+    r"token|secret|authorization|password|api[_-]?key|cookie|credential|private",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_PATTERN = re.compile(
+    r"secret|token|authorization|bearer|api[_-]?key|password|cookie|credential",
+    re.IGNORECASE,
+)
+
+
+def _validation_error() -> dict[str, object]:
+    return {
+        "ok": False,
+        "error": {
+            "kind": "validation_error",
+            "message": _VALIDATION_MESSAGE,
+            "retryable": False,
+        },
+    }
+
+
+def _execution_error() -> dict[str, object]:
+    return {
+        "ok": False,
+        "error": {
+            "kind": "tool_error",
+            "message": "Инструмент не удалось выполнить безопасно.",
+            "retryable": False,
+        },
+    }
+
+
+def _safe_call_result(error: dict[str, object]) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(
+                type="text",
+                text=json.dumps(error, ensure_ascii=False),
+            )
+        ],
+        structuredContent=error,
+        isError=True,
+    )
+
+
+@dataclass(frozen=True)
+class ToolInputSpec:
+    allowed_root_fields: frozenset[str]
+    required_root_fields: frozenset[str]
+    schema: dict[str, Any]
+    model: type[PayloadModel]
+    payload_wrapped: bool
+    payload_optional: bool
+
+
+def _payload_input_schema(
+    model: type[PayloadModel], *, required: bool
+) -> dict[str, Any]:
+    payload_schema = model.model_json_schema(by_alias=True)
+    definitions = payload_schema.pop("$defs", None)
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"payload": payload_schema},
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = ["payload"]
+    if definitions:
+        schema["$defs"] = definitions
+    return schema
+
+
+class SafeFastMCP(FastMCP):
+    """FastMCP with an explicit raw-input boundary before Pydantic dispatch."""
+
+    def __init__(self, name: str) -> None:
+        self._input_specs: dict[str, ToolInputSpec] = {}
+        super().__init__(name)
+
+    def register_payload_input(
+        self,
+        name: str,
+        model: type[PayloadModel],
+        *,
+        required: bool,
+    ) -> None:
+        self._input_specs[name] = ToolInputSpec(
+            allowed_root_fields=frozenset({"payload"}),
+            required_root_fields=frozenset({"payload"}) if required else frozenset(),
+            schema=_payload_input_schema(model, required=required),
+            model=model,
+            payload_wrapped=True,
+            payload_optional=not required,
+        )
+
+    def register_root_input(self, name: str, model: type[PayloadModel]) -> None:
+        schema = model.model_json_schema(by_alias=True)
+        self._input_specs[name] = ToolInputSpec(
+            allowed_root_fields=frozenset(model.model_fields),
+            required_root_fields=frozenset(
+                field_name
+                for field_name, field in model.model_fields.items()
+                if field.is_required()
+            ),
+            schema=schema,
+            model=model,
+            payload_wrapped=False,
+            payload_optional=False,
+        )
+
+    async def list_tools(self) -> list[mcp_types.Tool]:
+        tools = await super().list_tools()
+        return [
+            tool.model_copy(update={"inputSchema": self._input_specs[tool.name].schema})
+            if tool.name in self._input_specs
+            else tool
+            for tool in tools
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        spec = self._input_specs.get(name)
+        if spec is not None and (
+            any(key not in spec.allowed_root_fields for key in arguments)
+            or any(key not in arguments for key in spec.required_root_fields)
+        ):
+            return _safe_call_result(_validation_error())
+        if spec is not None and not self._valid_input(spec, arguments):
+            return _safe_call_result(_validation_error())
+        try:
+            return await super().call_tool(name, arguments)
+        except Exception:
+            return _safe_call_result(_execution_error())
+
+    @staticmethod
+    def _valid_input(spec: ToolInputSpec, arguments: Mapping[str, object]) -> bool:
+        try:
+            if spec.payload_wrapped:
+                payload = arguments.get("payload")
+                if payload is None:
+                    if not spec.payload_optional:
+                        return False
+                    spec.model()
+                elif isinstance(payload, Mapping):
+                    spec.model.model_validate(dict(payload))
+                else:
+                    return False
+            else:
+                spec.model.model_validate(dict(arguments))
+        except ValidationError:
+            return False
+        return True
+
+
+def _parse_payload(
+    raw_payload: object,
+    model: type[PayloadModel],
+    *,
+    optional: bool,
+) -> PayloadModel | None:
+    if raw_payload is None:
+        return model() if optional else None
+    if not isinstance(raw_payload, Mapping):
+        return None
+    try:
+        return model.model_validate(dict(raw_payload))
+    except ValidationError:
+        return None
+
+
+def _safe_summary_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _safe_summary_value(item)
+            for key, item in value.items()
+            if isinstance(key, str) and not _SECRET_KEY_PATTERN.search(key)
+        }
+    if isinstance(value, list | tuple):
+        return [_safe_summary_value(item) for item in value]
+    if isinstance(value, str):
+        return "[redacted]" if _SECRET_VALUE_PATTERN.search(value) else value
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return "[redacted]"
+
+
+def _plan_summary(operation: str, payload: Mapping[str, object]) -> dict[str, object]:
+    target_keys = ("nm_id", "nmID", "warehouse_id", "order_id", "supply_id")
+    targets = [
+        {key: _safe_summary_value(payload[key])}
+        for key in target_keys
+        if key in payload and not _SECRET_KEY_PATTERN.search(key)
+    ]
+    return {
+        "operation": operation,
+        "targets": targets,
+        "payload": _safe_summary_value(payload),
+    }
 
 
 def _as_payload(model: BaseModel) -> dict[str, object]:
@@ -675,22 +879,9 @@ def _plan_result(plan: ChangePlan) -> dict[str, object]:
         "status": "planned",
         "confirmation_id": plan.confirmation_id,
         "operation": plan.operation,
+        "summary": _plan_summary(plan.operation, plan.payload),
         "expires_at": plan.expires_at.isoformat(),
         "message": "Изменение не выполнено. Подтвердите его инструментом wb_apply_change.",
-    }
-
-
-def _unsupported_order_id() -> dict[str, object]:
-    return {
-        "ok": False,
-        "error": {
-            "kind": "validation_error",
-            "message": (
-                "В установленном SDK нет безопасной операции получения одного FBS "
-                "заказа по order_id. Используйте wb_list_orders с курсором и датами."
-            ),
-            "retryable": False,
-        },
     }
 
 
@@ -707,7 +898,7 @@ def create_server(
         gateway if gateway is not None else WildberriesGateway(runtime_token)
     )
     plans = change_store if change_store is not None else ChangeStore()
-    mcp = FastMCP("wb_mcp")
+    mcp = SafeFastMCP("wb_mcp")
 
     def read_tool(operation: str, payload: Mapping[str, object]) -> dict[str, object]:
         try:
@@ -734,10 +925,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_cards(
-        payload: ListCardsPayload = ListCardsPayload(),
-    ) -> dict[str, object]:
-        return read_tool("list_cards", _as_payload(payload))
+    def wb_list_cards(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ListCardsPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_cards", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_get_card_schema",
@@ -748,22 +940,24 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_card_schema(
-        payload: CardSchemaPayload = CardSchemaPayload(),
-    ) -> dict[str, object]:
-        raw = _as_payload(payload)
-        if payload.subject_id is not None:
-            selected: dict[str, object] = {"subject_id": payload.subject_id}
-            if payload.locale is not None:
-                selected["locale"] = payload.locale
+    def wb_get_card_schema(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CardSchemaPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        card_schema = cast(CardSchemaPayload, parsed)
+        raw = _as_payload(card_schema)
+        if card_schema.subject_id is not None:
+            selected: dict[str, object] = {"subject_id": card_schema.subject_id}
+            if card_schema.locale is not None:
+                selected["locale"] = card_schema.locale
             return read_tool("card_schema_characteristics", selected)
         if any(
             value is not None
             for value in (
-                payload.parent_id,
-                payload.name,
-                payload.limit,
-                payload.offset,
+                card_schema.parent_id,
+                card_schema.name,
+                card_schema.limit,
+                card_schema.offset,
             )
         ):
             selected = {
@@ -773,7 +967,7 @@ def create_server(
             }
             return read_tool("card_schema_subjects", selected)
         selected: dict[str, object] = (
-            {"locale": payload.locale} if payload.locale is not None else {}
+            {"locale": card_schema.locale} if card_schema.locale is not None else {}
         )
         return read_tool("card_schema_parents", selected)
 
@@ -786,10 +980,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_card_errors(
-        payload: CardErrorsPayload = CardErrorsPayload(),
-    ) -> dict[str, object]:
-        return read_tool("list_card_errors", _as_payload(payload))
+    def wb_list_card_errors(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CardErrorsPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_card_errors", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_list_tags",
@@ -797,8 +992,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_tags(payload: EmptyPayload = EmptyPayload()) -> dict[str, object]:
-        return read_tool("list_tags", _as_payload(payload))
+    def wb_list_tags(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_tags", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_list_prices",
@@ -809,8 +1007,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_prices(payload: PricesPayload = PricesPayload()) -> dict[str, object]:
-        return read_tool("list_prices", _as_payload(payload))
+    def wb_list_prices(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, PricesPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_prices", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_get_stocks",
@@ -821,8 +1022,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_stocks(payload: StocksPayload) -> dict[str, object]:
-        return read_tool("get_stocks", _as_payload(payload))
+    def wb_get_stocks(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, StocksPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_stocks", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_list_warehouses",
@@ -830,8 +1034,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_warehouses(payload: EmptyPayload = EmptyPayload()) -> dict[str, object]:
-        return read_tool("list_warehouses", _as_payload(payload))
+    def wb_list_warehouses(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_warehouses", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_list_orders",
@@ -842,24 +1049,41 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_orders(payload: OrdersPayload = OrdersPayload()) -> dict[str, object]:
-        return read_tool("list_orders", _as_payload(payload))
+    def wb_list_orders(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, OrdersPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_orders", _as_payload(parsed))
 
     @mcp.tool(
-        name="wb_get_order_details",
+        name="wb_list_new_orders",
         description=(
-            "Возвращает детали новых FBS-заказов WB. Установленный SDK не даёт безопасный "
-            "GET одного order_id: при его передаче инструмент вернёт подсказку для списка."
+            "Возвращает список новых FBS-заказов WB с доступными деталями. Это не поиск "
+            "одного заказа по ID; для пагинации и фильтра дат используйте wb_list_orders."
         ),
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_order_details(
-        payload: OrderDetailsPayload = OrderDetailsPayload(),
-    ) -> dict[str, object]:
-        if payload.order_id is not None:
-            return _unsupported_order_id()
-        return read_tool("get_order_details", {})
+    def wb_list_new_orders(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_new_orders", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_order_statuses",
+        description=(
+            "Возвращает текущие статусы до 1000 FBS-заказов WB по order_ids. "
+            "Инструмент только читает статусы и не создаёт план изменения."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_order_statuses(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, OrderStatusesPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_order_statuses", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_get_order_stickers",
@@ -870,8 +1094,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_order_stickers(payload: OrderStickersPayload) -> dict[str, object]:
-        return read_tool("get_order_stickers", _as_payload(payload))
+    def wb_get_order_stickers(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, OrderStickersPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_order_stickers", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_list_supplies",
@@ -882,10 +1109,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_list_supplies(
-        payload: SuppliesPayload = SuppliesPayload(),
-    ) -> dict[str, object]:
-        return read_tool("list_supplies", _as_payload(payload))
+    def wb_list_supplies(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SuppliesPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_supplies", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_get_supply",
@@ -893,8 +1121,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_supply(payload: SupplyIdPayload) -> dict[str, object]:
-        return read_tool("get_supply", _as_payload(payload))
+    def wb_get_supply(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SupplyIdPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_supply", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_get_supply_barcode",
@@ -905,8 +1136,11 @@ def create_server(
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_get_supply_barcode(payload: SupplyBarcodePayload) -> dict[str, object]:
-        return read_tool("get_supply_barcode", _as_payload(payload))
+    def wb_get_supply_barcode(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SupplyBarcodePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_supply_barcode", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_update_cards",
@@ -917,8 +1151,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_update_cards(payload: UpdateCardsPayload) -> dict[str, object]:
-        return plan_tool("update_cards", _as_payload(payload))
+    def wb_plan_update_cards(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdateCardsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("update_cards", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_save_media",
@@ -929,8 +1166,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_save_media(payload: SaveMediaPayload) -> dict[str, object]:
-        return plan_tool("save_media", _as_payload(payload))
+    def wb_plan_save_media(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SaveMediaPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("save_media", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_set_prices",
@@ -941,8 +1181,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_set_prices(payload: SetPricesPayload) -> dict[str, object]:
-        return plan_tool("set_prices", _as_payload(payload))
+    def wb_plan_set_prices(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SetPricesPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("set_prices", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_set_stocks",
@@ -953,8 +1196,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_set_stocks(payload: SetStocksPayload) -> dict[str, object]:
-        return plan_tool("set_stocks", _as_payload(payload))
+    def wb_plan_set_stocks(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SetStocksPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("set_stocks", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_manage_warehouse",
@@ -965,15 +1211,17 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_manage_warehouse(
-        payload: ManageWarehousePayload,
-    ) -> dict[str, object]:
-        raw = _as_payload(payload)
-        if payload.action == "create":
+    def wb_plan_manage_warehouse(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ManageWarehousePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        warehouse = cast(ManageWarehousePayload, parsed)
+        raw = _as_payload(warehouse)
+        if warehouse.action == "create":
             return plan_tool(
                 "create_warehouse", {"name": raw["name"], "office_id": raw["office_id"]}
             )
-        if payload.action == "update":
+        if warehouse.action == "update":
             return plan_tool(
                 "update_warehouse",
                 {
@@ -985,20 +1233,6 @@ def create_server(
         return plan_tool("delete_warehouse", {"warehouse_id": raw["warehouse_id"]})
 
     @mcp.tool(
-        name="wb_plan_update_order_status",
-        description=(
-            "Создаёт подтверждаемый план перевода статуса FBS-заказов WB. Передайте "
-            "до 1000 order_ids; WB не вызывается до wb_apply_change."
-        ),
-        annotations=PLAN_ANNOTATIONS,
-        structured_output=True,
-    )
-    def wb_plan_update_order_status(
-        payload: UpdateOrderStatusPayload,
-    ) -> dict[str, object]:
-        return plan_tool("update_order_status", _as_payload(payload))
-
-    @mcp.tool(
         name="wb_plan_cancel_order",
         description=(
             "Создаёт подтверждаемый план отмены одного FBS-заказа WB по order_id. "
@@ -1007,8 +1241,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_cancel_order(payload: CancelOrderPayload) -> dict[str, object]:
-        return plan_tool("cancel_order", _as_payload(payload))
+    def wb_plan_cancel_order(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CancelOrderPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("cancel_order", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_create_supply",
@@ -1019,8 +1256,11 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_create_supply(payload: CreateSupplyPayload) -> dict[str, object]:
-        return plan_tool("create_supply", _as_payload(payload))
+    def wb_plan_create_supply(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CreateSupplyPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("create_supply", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_update_supply",
@@ -1032,14 +1272,18 @@ def create_server(
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_plan_update_supply(payload: UpdateSupplyPayload) -> dict[str, object]:
-        raw = _as_payload(payload)
-        if payload.action == "attach_orders":
+    def wb_plan_update_supply(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdateSupplyPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        supply = cast(UpdateSupplyPayload, parsed)
+        raw = _as_payload(supply)
+        if supply.action == "attach_orders":
             return plan_tool(
                 "attach_supply_orders",
                 {"supply_id": raw["supply_id"], "order_ids": raw["order_ids"]},
             )
-        if payload.action == "deliver":
+        if supply.action == "deliver":
             return plan_tool("deliver_supply", {"supply_id": raw["supply_id"]})
         return plan_tool("delete_supply", {"supply_id": raw["supply_id"]})
 
@@ -1052,14 +1296,15 @@ def create_server(
         annotations=APPLY_ANNOTATIONS,
         structured_output=True,
     )
-    def wb_apply_change(
-        confirmation_id: StrictStr = Field(
-            description="Одноразовый ID подтверждаемого плана.",
-            examples=["f0f4b2d2-6b4b-4cc4-8df2-f8bd8416dc3a"],
-        ),
-    ) -> dict[str, object]:
+    def wb_apply_change(confirmation_id: object = None) -> dict[str, object]:
+        parsed = _parse_payload(
+            {"confirmation_id": confirmation_id}, ApplyChangeInput, optional=False
+        )
+        if parsed is None:
+            return _validation_error()
+        apply_input = cast(ApplyChangeInput, parsed)
         try:
-            plan = plans.consume(confirmation_id)
+            plan = plans.consume(apply_input.confirmation_id)
         except ConfirmationError as error:
             return _confirmation_error(error)
         try:
@@ -1072,6 +1317,46 @@ def create_server(
             "operation": plan.operation,
             "result": result,
         }
+
+    mcp.register_payload_input("wb_list_cards", ListCardsPayload, required=False)
+    mcp.register_payload_input("wb_get_card_schema", CardSchemaPayload, required=False)
+    mcp.register_payload_input("wb_list_card_errors", CardErrorsPayload, required=False)
+    mcp.register_payload_input("wb_list_tags", EmptyPayload, required=False)
+    mcp.register_payload_input("wb_list_prices", PricesPayload, required=False)
+    mcp.register_payload_input("wb_get_stocks", StocksPayload, required=True)
+    mcp.register_payload_input("wb_list_warehouses", EmptyPayload, required=False)
+    mcp.register_payload_input("wb_list_orders", OrdersPayload, required=False)
+    mcp.register_payload_input("wb_list_new_orders", EmptyPayload, required=False)
+    mcp.register_payload_input(
+        "wb_get_order_statuses", OrderStatusesPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_order_stickers", OrderStickersPayload, required=True
+    )
+    mcp.register_payload_input("wb_list_supplies", SuppliesPayload, required=False)
+    mcp.register_payload_input("wb_get_supply", SupplyIdPayload, required=True)
+    mcp.register_payload_input(
+        "wb_get_supply_barcode", SupplyBarcodePayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_update_cards", UpdateCardsPayload, required=True
+    )
+    mcp.register_payload_input("wb_plan_save_media", SaveMediaPayload, required=True)
+    mcp.register_payload_input("wb_plan_set_prices", SetPricesPayload, required=True)
+    mcp.register_payload_input("wb_plan_set_stocks", SetStocksPayload, required=True)
+    mcp.register_payload_input(
+        "wb_plan_manage_warehouse", ManageWarehousePayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_cancel_order", CancelOrderPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_create_supply", CreateSupplyPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_update_supply", UpdateSupplyPayload, required=True
+    )
+    mcp.register_root_input("wb_apply_change", ApplyChangeInput)
 
     return mcp
 

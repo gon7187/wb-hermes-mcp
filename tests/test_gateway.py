@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
-from wb_mcp.gateway import WBError, WildberriesGateway
+from wb_mcp.gateway import OPERATIONS, WBError, WildberriesGateway
 
 
 class SellerProfile(BaseModel):
@@ -117,6 +117,33 @@ def test_gateway_rejects_a_mode_mismatch_before_calling_the_sdk() -> None:
     assert error.kind == "operation_mode_mismatch"
     assert error.retryable is False
     assert "read" in error.message
+
+
+def test_gateway_validates_a_planned_write_without_needing_an_sdk_client() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    gateway.validate_write("set_prices", {"items": []})
+
+    with pytest.raises(WBError) as caught:
+        gateway.validate_write(
+            "set_prices",
+            {"items": [], "secret": "SECRET_MARKER"},
+        )
+
+    assert caught.value.kind == "invalid_payload"
+    assert "SECRET_MARKER" not in caught.value.message
+
+
+def test_order_status_operation_is_registered_read_only_not_as_a_mutation() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    assert "update_order_status" not in OPERATIONS
+    assert OPERATIONS["get_order_statuses"].mutation is False
+
+    with pytest.raises(WBError) as caught:
+        gateway.write("get_order_statuses", {"order_ids": [12345678]})
+
+    assert caught.value.kind == "operation_mode_mismatch"
 
 
 def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None:

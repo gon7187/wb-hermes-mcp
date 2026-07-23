@@ -43,3 +43,20 @@
   is no safe all-stock endpoint.
 - Saving media replaces the entire media sequence, which is stated in the
   plan-tool description.
+
+## Review remediation
+
+- Replaced the misleading `wb_get_order_details` name with the read-only
+  `wb_list_new_orders`; removed the fabricated status-update plan and added
+  read-only `wb_get_order_statuses` backed by the real status endpoint.
+- Added a `SafeFastMCP` input boundary that validates raw arguments before
+  FastMCP can render invalid values, rejects root and nested extra fields, and
+  returns a fixed structured validation error without echoing user input.
+- Marked `wb_apply_change` as destructive, added a redacted exact plan summary,
+  and made the price-upload gateway adapter reject unsupported fields directly.
+- Added regression coverage for safe validation errors, one-time confirmation
+  consumption on both successful and failed applies, redacted summaries,
+  destructive annotations, named read-only order status access, and gateway
+  operation validation.
+- Verification: focused regression tests passed, full `uv run pytest -v`
+  passed (`24 passed`), and Ruff formatting/lint plus Pyright completed cleanly.

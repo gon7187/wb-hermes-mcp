@@ -60,6 +60,7 @@ class WBError(Exception):
 def _adapt_price_upload(payload: Mapping[str, object]) -> Mapping[str, object]:
     """Build the generated request object for the named price-upload operation."""
 
+    _allow_only(payload, {"items"})
     raw_items = payload.get("items")
     if not isinstance(raw_items, list) or len(raw_items) > 1_000:
         raise ValueError("price upload items are invalid")
@@ -308,7 +309,7 @@ def _adapt_delete_warehouse(payload: Mapping[str, object]) -> Mapping[str, objec
     return {"warehouse_id": _require_int(payload, "warehouse_id")}
 
 
-def _adapt_update_order_status(payload: Mapping[str, object]) -> Mapping[str, object]:
+def _adapt_get_order_statuses(payload: Mapping[str, object]) -> Mapping[str, object]:
     _allow_only(payload, {"order_ids"})
     order_ids = _require_list(payload, "order_ids")
     if not order_ids:
@@ -416,10 +417,15 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             method="api_v3_orders_get",
             payload_adapter=_adapt_list_orders,
         ),
-        "get_order_details": Operation(
+        "list_new_orders": Operation(
             client="orders_fbs",
             method="api_v3_orders_new_get",
             payload_adapter=_require_empty_payload,
+        ),
+        "get_order_statuses": Operation(
+            client="orders_fbs",
+            method="api_v3_orders_status_post",
+            payload_adapter=_adapt_get_order_statuses,
         ),
         "get_order_stickers": Operation(
             client="orders_fbs",
@@ -476,12 +482,6 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             method="api_v3_warehouses_warehouse_id_delete",
             mutation=True,
             payload_adapter=_adapt_delete_warehouse,
-        ),
-        "update_order_status": Operation(
-            client="orders_fbs",
-            method="api_v3_orders_status_post",
-            mutation=True,
-            payload_adapter=_adapt_update_order_status,
         ),
         "cancel_order": Operation(
             client="orders_fbs",
