@@ -356,13 +356,19 @@ async def test_server_exposes_every_remaining_business_domain() -> None:
         "wb_get_seller_profile",
         "wb_get_tariffs",
         "wb_list_campaigns",
+        "wb_get_campaign_counts",
         "wb_get_campaign",
         "wb_get_campaign_stats",
         "wb_get_campaign_bids",
+        "wb_get_minimum_campaign_bids",
+        "wb_get_campaign_spend_history",
         "wb_get_search_clusters",
+        "wb_list_sales",
         "wb_get_sales_funnel",
         "wb_get_search_queries",
         "wb_get_stock_analytics",
+        "wb_get_stock_products",
+        "wb_get_wb_warehouse_stocks",
         "wb_get_report_status",
         "wb_get_balance",
         "wb_list_financial_documents",
@@ -391,6 +397,7 @@ async def test_server_exposes_every_remaining_business_domain() -> None:
         ("wb_get_seller_profile", {}, "seller_profile"),
         ("wb_get_tariffs", {"payload": {"kind": "commission"}}, "tariffs_commission"),
         ("wb_list_campaigns", {}, "list_campaigns"),
+        ("wb_get_campaign_counts", {}, "campaign_counts"),
         ("wb_get_campaign", {"payload": {"campaign_id": 1}}, "get_campaign"),
         (
             "wb_get_campaign_stats",
@@ -409,6 +416,23 @@ async def test_server_exposes_every_remaining_business_domain() -> None:
             "campaign_bids",
         ),
         (
+            "wb_get_minimum_campaign_bids",
+            {
+                "payload": {
+                    "campaign_id": 1,
+                    "nm_ids": [2],
+                    "payment_type": "cpm",
+                    "placement_types": ["search"],
+                }
+            },
+            "minimum_campaign_bids",
+        ),
+        (
+            "wb_get_campaign_spend_history",
+            {"payload": {"date_from": "2026-07-01", "date_to": "2026-07-02"}},
+            "campaign_spend_history",
+        ),
+        (
             "wb_get_search_clusters",
             {"payload": {"campaign_id": 1, "nm_id": 2}},
             "search_clusters",
@@ -423,6 +447,11 @@ async def test_server_exposes_every_remaining_business_domain() -> None:
                 }
             },
             "sales_funnel",
+        ),
+        (
+            "wb_list_sales",
+            {"payload": {"date_from": "2026-07-01T00:00:00", "flag": 0}},
+            "list_sales",
         ),
         (
             "wb_get_search_queries",
@@ -445,6 +474,28 @@ async def test_server_exposes_every_remaining_business_domain() -> None:
                 }
             },
             "stock_analytics",
+        ),
+        (
+            "wb_get_stock_products",
+            {
+                "payload": {
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                    "stock_type": "",
+                    "skip_deleted_nm": True,
+                    "order_field": "stockCount",
+                    "order_mode": "asc",
+                    "availability_filters": [],
+                    "limit": 1000,
+                    "offset": 0,
+                }
+            },
+            "stock_products",
+        ),
+        (
+            "wb_get_wb_warehouse_stocks",
+            {"payload": {"limit": 250000, "offset": 0}},
+            "wb_warehouse_stocks",
         ),
         ("wb_get_report_status", {}, "report_status"),
         ("wb_get_balance", {}, "balance"),
@@ -491,6 +542,11 @@ async def test_remaining_read_tools_route_only_to_named_gateway_operations(
             "pause_campaign",
         ),
         (
+            "wb_plan_update_campaign",
+            {"action": "delete", "campaign_id": 1},
+            "delete_campaign",
+        ),
+        (
             "wb_plan_update_bids",
             {
                 "campaign_id": 1,
@@ -525,7 +581,7 @@ async def test_remaining_read_tools_route_only_to_named_gateway_operations(
         ),
         (
             "wb_plan_deposit_campaign_budget",
-            {"campaign_id": 1, "amount": 3000},
+            {"campaign_id": 1, "amount": 3000, "source_type": 1},
             "deposit_campaign_budget",
         ),
     ],

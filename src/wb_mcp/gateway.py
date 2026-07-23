@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, time
@@ -12,6 +13,7 @@ from typing import Final, TypeAlias, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
 from wildberries_sdk import (
     analytics,
     communications,
@@ -21,6 +23,7 @@ from wildberries_sdk import (
     orders_fbs,
     promotion,
     rates,
+    reports,
 )
 
 
@@ -28,6 +31,7 @@ JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 )
 PayloadAdapter: TypeAlias = Callable[[Mapping[str, object]], Mapping[str, object]]
+MAX_RAW_RESPONSE_BYTES: Final = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class Operation:
     method: str
     mutation: bool = False
     payload_adapter: PayloadAdapter | None = None
+    raw_json: bool = False
 
 
 class WBError(Exception):
@@ -64,6 +69,35 @@ class WBError(Exception):
             "message": self.message,
             "retryable": self.retryable,
         }
+
+
+class _RawResponseStatusError(Exception):
+    """Carry only an HTTP status from a generated SDK raw response."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__("Wildberries returned an unsuccessful HTTP status.")
+
+
+def _read_raw_json_response(response: object) -> object:
+    """Decode an SDK raw response without relying on stale generated enums."""
+
+    transport = getattr(response, "response", response)
+    read = getattr(transport, "read", None)
+    release = getattr(transport, "release_conn", None)
+    if not callable(read):
+        raise TypeError("SDK raw response cannot be read")
+    try:
+        body = read(MAX_RAW_RESPONSE_BYTES + 1)
+        status = getattr(response, "status", None)
+        if isinstance(status, int) and not 200 <= status < 300:
+            raise _RawResponseStatusError(status)
+        if not isinstance(body, bytes) or len(body) > MAX_RAW_RESPONSE_BYTES:
+            raise ValueError("SDK raw response has an invalid size")
+        return json.loads(body)
+    finally:
+        if callable(release):
+            release()
 
 
 def _adapt_price_upload(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -433,12 +467,40 @@ def _adapt_campaign_stats(payload: Mapping[str, object]) -> Mapping[str, object]
     }
 
 
+def _adapt_campaign_spend_history(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    _allow_only(payload, {"date_from", "date_to"})
+    return {
+        "var_from": _require_date(payload, "date_from"),
+        "to": _require_date(payload, "date_to"),
+    }
+
+
 def _adapt_campaign_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
     _allow_only(payload, {"campaign_id", "nm_id"})
     return {
         "advert_id": _require_int(payload, "campaign_id"),
         "nm_id": _require_int(payload, "nm_id"),
     }
+
+
+def _adapt_minimum_campaign_bids(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    _allow_only(
+        payload,
+        {"campaign_id", "nm_ids", "payment_type", "placement_types"},
+    )
+    request = promotion.ApiAdvertV1BidsMinPostRequest.model_validate(
+        {
+            "advert_id": _require_int(payload, "campaign_id"),
+            "nm_ids": _require_list(payload, "nm_ids"),
+            "payment_type": _require_str(payload, "payment_type"),
+            "placement_types": _require_list(payload, "placement_types"),
+        }
+    )
+    return {"api_advert_v1_bids_min_post_request": request}
 
 
 def _adapt_campaign_id(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -459,6 +521,14 @@ def _adapt_search_clusters(payload: Mapping[str, object]) -> Mapping[str, object
         }
     )
     return {"v0_get_norm_query_list_request": request}
+
+
+def _adapt_list_sales(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"date_from", "flag"})
+    arguments: dict[str, object] = {
+        "date_from": _require_str(payload, "date_from"),
+    }
+    return _copy_optional(arguments, payload, "flag")
 
 
 def _adapt_sales_funnel(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -507,6 +577,64 @@ def _adapt_stock_analytics(payload: Mapping[str, object]) -> Mapping[str, object
         }
     )
     return {"body": request}
+
+
+def _adapt_stock_products(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(
+        payload,
+        {
+            "nm_ids",
+            "subject_id",
+            "brand_name",
+            "tag_id",
+            "date_from",
+            "date_to",
+            "stock_type",
+            "skip_deleted_nm",
+            "order_field",
+            "order_mode",
+            "availability_filters",
+            "limit",
+            "offset",
+        },
+    )
+    request = analytics.TableItemRequest.model_validate(
+        {
+            "nmIDs": payload.get("nm_ids"),
+            "subjectID": payload.get("subject_id"),
+            "brandName": payload.get("brand_name"),
+            "tagID": payload.get("tag_id"),
+            "currentPeriod": {
+                "start": _require_date(payload, "date_from"),
+                "end": _require_date(payload, "date_to"),
+            },
+            "stockType": payload.get("stock_type", ""),
+            "skipDeletedNm": payload.get("skip_deleted_nm", True),
+            "orderBy": {
+                "field": payload.get("order_field", "stockCount"),
+                "mode": payload.get("order_mode", "asc"),
+            },
+            "availabilityFilters": payload.get("availability_filters", []),
+            "limit": payload.get("limit", 1000),
+            "offset": payload.get("offset", 0),
+        }
+    )
+    return {"table_item_request": request}
+
+
+def _adapt_wb_warehouse_stocks(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    _allow_only(payload, {"nm_ids", "chrt_ids", "limit", "offset"})
+    request = analytics.InventoryRequest.model_validate(
+        {
+            "nmIds": payload.get("nm_ids"),
+            "chrtIds": payload.get("chrt_ids"),
+            "limit": payload.get("limit", 250_000),
+            "offset": payload.get("offset", 0),
+        }
+    )
+    return {"inventory_request": request}
 
 
 def _adapt_report_status(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -725,9 +853,15 @@ def _adapt_send_chat_message(payload: Mapping[str, object]) -> Mapping[str, obje
 def _adapt_deposit_campaign_budget(
     payload: Mapping[str, object],
 ) -> Mapping[str, object]:
-    _allow_only(payload, {"campaign_id", "amount"})
+    _allow_only(payload, {"campaign_id", "amount", "source_type"})
+    amount = _require_int(payload, "amount")
+    if amount < 1_000:
+        raise ValueError("campaign budget deposit is below the documented minimum")
+    source_type = payload.get("source_type", 1)
+    if type(source_type) is not int or source_type not in {0, 1, 3}:
+        raise ValueError("campaign budget source type is invalid")
     request = promotion.AdvV1BudgetDepositPostRequest.model_validate(
-        {"sum": _require_int(payload, "amount")}
+        {"sum": amount, "type": source_type}
     )
     return {
         "id": _require_int(payload, "campaign_id"),
@@ -919,6 +1053,11 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             method="get_v1_acceptance_coefficients",
             payload_adapter=_adapt_acceptance_coefficients,
         ),
+        "campaign_counts": Operation(
+            client="promotion",
+            method="adv_v1_promotion_count_get",
+            payload_adapter=_require_empty_payload,
+        ),
         "list_campaigns": Operation(
             client="promotion",
             method="api_advert_v2_adverts_get",
@@ -931,13 +1070,24 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
         ),
         "campaign_stats": Operation(
             client="promotion",
-            method="adv_v3_fullstats_get",
+            method="adv_v3_fullstats_get_without_preload_content",
             payload_adapter=_adapt_campaign_stats,
+            raw_json=True,
+        ),
+        "campaign_spend_history": Operation(
+            client="promotion",
+            method="adv_v1_upd_get",
+            payload_adapter=_adapt_campaign_spend_history,
         ),
         "campaign_bids": Operation(
             client="promotion",
             method="api_advert_v0_bids_recommendations_get",
             payload_adapter=_adapt_campaign_bids,
+        ),
+        "minimum_campaign_bids": Operation(
+            client="promotion",
+            method="api_advert_v1_bids_min_post",
+            payload_adapter=_adapt_minimum_campaign_bids,
         ),
         "campaign_budget": Operation(
             client="promotion",
@@ -948,6 +1098,11 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             client="promotion",
             method="adv_v0_normquery_list_post",
             payload_adapter=_adapt_search_clusters,
+        ),
+        "list_sales": Operation(
+            client="reports",
+            method="api_v1_supplier_sales_get",
+            payload_adapter=_adapt_list_sales,
         ),
         "sales_funnel": Operation(
             client="analytics",
@@ -963,6 +1118,16 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             client="analytics",
             method="api_v2_stocks_report_offices_post",
             payload_adapter=_adapt_stock_analytics,
+        ),
+        "stock_products": Operation(
+            client="analytics",
+            method="api_v2_stocks_report_products_products_post",
+            payload_adapter=_adapt_stock_products,
+        ),
+        "wb_warehouse_stocks": Operation(
+            client="analytics",
+            method="post_v1_stocks_report_wb_warehouses",
+            payload_adapter=_adapt_wb_warehouse_stocks,
         ),
         "report_status": Operation(
             client="analytics",
@@ -1020,6 +1185,12 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
         "stop_campaign": Operation(
             client="promotion",
             method="adv_v0_stop_get",
+            mutation=True,
+            payload_adapter=_adapt_campaign_id,
+        ),
+        "delete_campaign": Operation(
+            client="promotion",
+            method="adv_v0_delete_get",
             mutation=True,
             payload_adapter=_adapt_campaign_id,
         ),
@@ -1092,6 +1263,9 @@ def _create_sdk_clients(token: str) -> dict[str, object]:
         ),
         "rates": rates.DefaultApi(
             rates.ApiClient(rates.Configuration(api_key={"HeaderApiKey": token}))
+        ),
+        "reports": reports.DefaultApi(
+            reports.ApiClient(reports.Configuration(api_key={"HeaderApiKey": token}))
         ),
         "promotion": promotion.DefaultApi(
             promotion.ApiClient(
@@ -1232,6 +1406,8 @@ class WildberriesGateway:
 
         try:
             response = method(**arguments)
+            if operation.raw_json:
+                response = _read_raw_json_response(response)
         except Exception as error:
             raise self._sdk_error(operation_name, error) from None
 
@@ -1248,6 +1424,7 @@ class WildberriesGateway:
     @staticmethod
     def _sdk_error(operation: str, error: Exception) -> WBError:
         status = getattr(error, "status", None)
+        reason = getattr(error, "reason", None)
         if status == 429:
             return WBError(
                 operation=operation,
@@ -1269,7 +1446,11 @@ class WildberriesGateway:
                 message="Wildberries rejected this request; review the payload.",
                 retryable=False,
             )
-        if isinstance(error, TimeoutError | ConnectionError):
+        if (
+            status == 0
+            or isinstance(error, TimeoutError | ConnectionError | Urllib3HTTPError)
+            or isinstance(reason, TimeoutError | ConnectionError | Urllib3HTTPError)
+        ):
             return WBError(
                 operation=operation,
                 kind="transport_error",

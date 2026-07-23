@@ -4,6 +4,7 @@ from inspect import signature
 
 import pytest
 from pydantic import BaseModel
+from wildberries_sdk.promotion.rest import RESTResponse
 
 from wb_mcp import gateway as gateway_module
 from wb_mcp.gateway import OPERATIONS, WBError, WildberriesGateway
@@ -188,10 +189,137 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
     assert "https://" not in error.message
 
 
+def test_campaign_stats_uses_the_sdk_raw_response_when_generated_enum_is_stale() -> (
+    None
+):
+    received: dict[str, object] = {}
+
+    class UnderlyingResponse:
+        status = 200
+        reason = "OK"
+        headers: dict[str, str] = {}
+        released = False
+        read_amount: int | None = None
+
+        def read(self, amount: int | None = None) -> bytes:
+            self.read_amount = amount
+            return (
+                b'[{"advertId":1,"days":[{"apps":[{"appType":128}],'
+                b'"date":"2026-07-23"}]}]'
+            )
+
+        def release_conn(self) -> None:
+            self.released = True
+
+    underlying = UnderlyingResponse()
+    response = RESTResponse(underlying)
+
+    class Promotion:
+        def adv_v3_fullstats_get_without_preload_content(
+            self,
+            *,
+            ids: str,
+            begin_date: date,
+            end_date: date,
+        ) -> RESTResponse:
+            received.update(
+                {
+                    "ids": ids,
+                    "begin_date": begin_date,
+                    "end_date": end_date,
+                }
+            )
+            return response
+
+    gateway = WildberriesGateway("test-token", clients={"promotion": Promotion()})
+
+    result = gateway.read(
+        "campaign_stats",
+        {
+            "campaign_ids": [1],
+            "date_from": date(2026, 7, 23),
+            "date_to": date(2026, 7, 23),
+        },
+    )
+
+    assert result == {
+        "data": [
+            {
+                "advertId": 1,
+                "days": [
+                    {
+                        "apps": [{"appType": 128}],
+                        "date": "2026-07-23",
+                    }
+                ],
+            }
+        ]
+    }
+    assert received == {
+        "ids": "1",
+        "begin_date": date(2026, 7, 23),
+        "end_date": date(2026, 7, 23),
+    }
+    assert underlying.released is True
+    assert underlying.read_amount == 128 * 1024 * 1024 + 1
+
+
+def test_campaign_stats_maps_a_raw_429_without_exposing_the_body() -> None:
+    class RawResponse:
+        status = 429
+
+        def read(self, amount: int | None = None) -> bytes:
+            return b'{"detail":"SECRET_MARKER"}'
+
+        def release_conn(self) -> None:
+            pass
+
+    class Promotion:
+        def adv_v3_fullstats_get_without_preload_content(
+            self,
+            **kwargs: object,
+        ) -> RawResponse:
+            return RawResponse()
+
+    gateway = WildberriesGateway("test-token", clients={"promotion": Promotion()})
+
+    with pytest.raises(WBError) as caught:
+        gateway.read(
+            "campaign_stats",
+            {
+                "campaign_ids": [1],
+                "date_from": date(2026, 7, 23),
+                "date_to": date(2026, 7, 23),
+            },
+        )
+
+    assert caught.value.kind == "rate_limited"
+    assert caught.value.retryable is True
+    assert "SECRET_MARKER" not in caught.value.message
+
+
+def test_gateway_treats_sdk_status_zero_as_retryable_transport() -> None:
+    class TransportError(Exception):
+        status = 0
+
+    class General:
+        def get_v1_seller_info(self) -> dict[str, object]:
+            raise TransportError
+
+    gateway = WildberriesGateway("test-token", clients={"general": General()})
+
+    with pytest.raises(WBError) as caught:
+        gateway.read("seller_profile", {})
+
+    assert caught.value.kind == "transport_error"
+    assert caught.value.retryable is True
+
+
 @pytest.mark.parametrize(
     ("operation", "payload", "mutation"),
     [
         ("tariffs_commission", {"locale": "ru"}, False),
+        ("campaign_counts", {}, False),
         ("list_campaigns", {}, False),
         ("get_campaign", {"campaign_id": 1}, False),
         (
@@ -205,7 +333,23 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
         ),
         ("campaign_bids", {"campaign_id": 1, "nm_id": 2}, False),
         ("campaign_budget", {"campaign_id": 1}, False),
+        (
+            "campaign_spend_history",
+            {"date_from": date(2026, 7, 1), "date_to": date(2026, 7, 2)},
+            False,
+        ),
+        (
+            "minimum_campaign_bids",
+            {
+                "campaign_id": 1,
+                "nm_ids": [2],
+                "payment_type": "cpm",
+                "placement_types": ["search"],
+            },
+            False,
+        ),
         ("search_clusters", {"campaign_id": 1, "nm_id": 2}, False),
+        ("list_sales", {"date_from": "2026-07-01T00:00:00", "flag": 0}, False),
         (
             "sales_funnel",
             {"nm_ids": [2], "date_from": date(2026, 7, 1), "date_to": date(2026, 7, 2)},
@@ -232,6 +376,26 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
             },
             False,
         ),
+        (
+            "stock_products",
+            {
+                "date_from": date(2026, 7, 1),
+                "date_to": date(2026, 7, 2),
+                "stock_type": "",
+                "skip_deleted_nm": True,
+                "order_field": "stockCount",
+                "order_mode": "asc",
+                "availability_filters": [],
+                "limit": 1000,
+                "offset": 0,
+            },
+            False,
+        ),
+        (
+            "wb_warehouse_stocks",
+            {"limit": 250000, "offset": 0},
+            False,
+        ),
         ("report_status", {}, False),
         ("balance", {}, False),
         ("financial_documents", {"locale": "ru", "limit": 50, "offset": 0}, False),
@@ -251,6 +415,7 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
             True,
         ),
         ("pause_campaign", {"campaign_id": 1}, True),
+        ("delete_campaign", {"campaign_id": 1}, True),
         (
             "update_bids",
             {
@@ -272,7 +437,11 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
         ("reply_feedback", {"feedback_id": "id", "text": "text"}, True),
         ("reply_question", {"question_id": "id", "text": "text"}, True),
         ("send_chat_message", {"reply_sign": "sign", "message": "text"}, True),
-        ("deposit_campaign_budget", {"campaign_id": 1, "amount": 3000}, True),
+        (
+            "deposit_campaign_budget",
+            {"campaign_id": 1, "amount": 3000, "source_type": 1},
+            True,
+        ),
     ],
 )
 def test_remaining_operations_build_generated_sdk_arguments_without_network(
@@ -361,3 +530,83 @@ def test_manual_campaign_creation_defaults_to_search_and_recommendations() -> No
         "search",
         "recommendations",
     ]
+
+
+def test_stock_product_request_matches_the_legacy_monitor_contract() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    _, arguments = gateway._validated_arguments(
+        "stock_products",
+        {
+            "date_from": date(2026, 7, 1),
+            "date_to": date(2026, 7, 2),
+            "stock_type": "",
+            "skip_deleted_nm": True,
+            "order_field": "stockCount",
+            "order_mode": "asc",
+            "availability_filters": [],
+            "limit": 1000,
+            "offset": 0,
+        },
+        mutation=False,
+    )
+
+    request = arguments["table_item_request"]
+    assert getattr(request, "model_dump")(mode="json", by_alias=True) == {
+        "nmIDs": None,
+        "subjectID": None,
+        "brandName": None,
+        "tagID": None,
+        "currentPeriod": {"start": "2026-07-01", "end": "2026-07-02"},
+        "stockType": "",
+        "skipDeletedNm": True,
+        "orderBy": {"field": "stockCount", "mode": "asc"},
+        "availabilityFilters": [],
+        "limit": 1000,
+        "offset": 0,
+    }
+
+
+def test_warehouse_stock_request_uses_the_current_sdk_pagination_fields() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    _, arguments = gateway._validated_arguments(
+        "wb_warehouse_stocks",
+        {"nm_ids": [123], "limit": 250000, "offset": 0},
+        mutation=False,
+    )
+
+    request = arguments["inventory_request"]
+    assert getattr(request, "model_dump")(mode="json", by_alias=True) == {
+        "nmIds": [123],
+        "chrtIds": None,
+        "limit": 250000,
+        "offset": 0,
+    }
+
+
+def test_deposit_forwards_the_explicit_balance_source_in_rubles() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    _, arguments = gateway._validated_arguments(
+        "deposit_campaign_budget",
+        {"campaign_id": 77, "amount": 3000, "source_type": 1},
+        mutation=True,
+    )
+
+    request = arguments["adv_v1_budget_deposit_post_request"]
+    body = getattr(request, "model_dump")(mode="json", by_alias=True)
+    assert body["sum"] == 3000
+    assert body["type"] == 1
+
+
+def test_deposit_rejects_an_amount_below_the_documented_minimum() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    with pytest.raises(WBError) as caught:
+        gateway.validate_write(
+            "deposit_campaign_budget",
+            {"campaign_id": 77, "amount": 999, "source_type": 1},
+        )
+
+    assert caught.value.kind == "invalid_payload"
