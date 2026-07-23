@@ -125,7 +125,7 @@ async def test_plan_does_not_call_the_sdk_until_applied_once() -> None:
         assert plan.structuredContent["summary"] == {
             "operation": "set_prices",
             "targets": [],
-            "payload": {"items": []},
+            "payload": {"items_count": 0},
         }
 
         applied = await client.call_tool(
@@ -284,6 +284,359 @@ async def test_plan_summary_redacts_secret_like_values() -> None:
     assert plan.structuredContent["summary"] == {
         "operation": "create_supply",
         "targets": [],
-        "payload": {"name": "[redacted]"},
+        "payload": {"name_length": 13},
     }
     assert "SECRET_MARKER" not in json.dumps(plan.model_dump(mode="json"))
+
+
+@pytest.mark.anyio
+async def test_plan_summary_keeps_business_dates_visible_for_review() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        plan = await client.call_tool(
+            "wb_plan_start_report",
+            {
+                "payload": {
+                    "nm_ids": [987654321],
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                }
+            },
+        )
+
+    assert plan.structuredContent is not None
+    assert plan.structuredContent["summary"] == {
+        "operation": "start_report",
+        "targets": [],
+        "payload": {
+            "nm_ids": [987654321],
+            "date_from": "2026-07-01",
+            "date_to": "2026-07-02",
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_plan_summary_never_exposes_signed_media_urls() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+    signed_url = "https://storage.example.invalid/image.jpg?X-Amz-Signature=abc123"
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        plan = await client.call_tool(
+            "wb_plan_save_media",
+            {"payload": {"nm_id": 987654321, "media_urls": [signed_url]}},
+        )
+
+    assert plan.structuredContent is not None
+    assert plan.structuredContent["summary"] == {
+        "operation": "save_media",
+        "targets": [{"nm_id": 987654321}],
+        "payload": {"media_urls_count": 1},
+    }
+    assert "X-Amz-Signature" not in json.dumps(plan.model_dump(mode="json"))
+    assert signed_url not in json.dumps(plan.model_dump(mode="json"))
+
+
+@pytest.mark.anyio
+async def test_server_exposes_every_remaining_business_domain() -> None:
+    gateway = RecordingGateway()
+    wb_server = server.create_server(token="test-token", gateway=gateway)
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+
+    expected = {
+        "wb_get_seller_profile",
+        "wb_get_tariffs",
+        "wb_list_campaigns",
+        "wb_get_campaign",
+        "wb_get_campaign_stats",
+        "wb_get_campaign_bids",
+        "wb_get_search_clusters",
+        "wb_get_sales_funnel",
+        "wb_get_search_queries",
+        "wb_get_stock_analytics",
+        "wb_get_report_status",
+        "wb_get_balance",
+        "wb_list_financial_documents",
+        "wb_list_feedbacks",
+        "wb_list_questions",
+        "wb_list_chats",
+        "wb_list_chat_events",
+        "wb_plan_update_campaign",
+        "wb_plan_update_bids",
+        "wb_plan_update_minus_phrases",
+        "wb_plan_start_report",
+        "wb_plan_reply_feedback",
+        "wb_plan_reply_question",
+        "wb_plan_send_chat_message",
+        "wb_plan_deposit_campaign_budget",
+        "wb_describe_operation",
+    }
+
+    assert expected <= names
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "operation"),
+    [
+        ("wb_get_seller_profile", {}, "seller_profile"),
+        ("wb_get_tariffs", {"payload": {"kind": "commission"}}, "tariffs_commission"),
+        ("wb_list_campaigns", {}, "list_campaigns"),
+        ("wb_get_campaign", {"payload": {"campaign_id": 1}}, "get_campaign"),
+        (
+            "wb_get_campaign_stats",
+            {
+                "payload": {
+                    "campaign_ids": [1],
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                }
+            },
+            "campaign_stats",
+        ),
+        (
+            "wb_get_campaign_bids",
+            {"payload": {"campaign_id": 1, "nm_id": 2}},
+            "campaign_bids",
+        ),
+        (
+            "wb_get_search_clusters",
+            {"payload": {"campaign_id": 1, "nm_id": 2}},
+            "search_clusters",
+        ),
+        (
+            "wb_get_sales_funnel",
+            {
+                "payload": {
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                    "nm_ids": [2],
+                }
+            },
+            "sales_funnel",
+        ),
+        (
+            "wb_get_search_queries",
+            {
+                "payload": {
+                    "nm_ids": [2],
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                }
+            },
+            "search_queries",
+        ),
+        (
+            "wb_get_stock_analytics",
+            {
+                "payload": {
+                    "nm_ids": [2],
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                }
+            },
+            "stock_analytics",
+        ),
+        ("wb_get_report_status", {}, "report_status"),
+        ("wb_get_balance", {}, "balance"),
+        ("wb_list_financial_documents", {}, "financial_documents"),
+        (
+            "wb_list_feedbacks",
+            {"payload": {"is_answered": False, "take": 10, "skip": 0}},
+            "feedbacks",
+        ),
+        (
+            "wb_list_questions",
+            {"payload": {"is_answered": False, "take": 10, "skip": 0}},
+            "questions",
+        ),
+        ("wb_list_chats", {}, "chats"),
+        ("wb_list_chat_events", {}, "chat_events"),
+    ],
+)
+async def test_remaining_read_tools_route_only_to_named_gateway_operations(
+    tool_name: str,
+    arguments: dict[str, object],
+    operation: str,
+) -> None:
+    gateway = RecordingGateway()
+    wb_server = server.create_server(token="test-token", gateway=gateway)
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        result = await client.call_tool(tool_name, arguments)
+
+    assert result.isError is False
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0][:2] == ("read", operation)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "payload", "operation"),
+    [
+        (
+            "wb_plan_update_campaign",
+            {"action": "pause", "campaign_id": 1},
+            "pause_campaign",
+        ),
+        (
+            "wb_plan_update_bids",
+            {
+                "campaign_id": 1,
+                "bids": [{"nm_id": 2, "bid_kopecks": 10_000, "placement": "search"}],
+            },
+            "update_bids",
+        ),
+        (
+            "wb_plan_update_minus_phrases",
+            {"campaign_id": 1, "nm_id": 2, "phrases": ["нецелевой запрос"]},
+            "set_minus_phrases",
+        ),
+        (
+            "wb_plan_start_report",
+            {"nm_ids": [2], "date_from": "2026-07-01", "date_to": "2026-07-02"},
+            "start_report",
+        ),
+        (
+            "wb_plan_reply_feedback",
+            {"feedback_id": "feedback-1", "text": "Спасибо за отзыв"},
+            "reply_feedback",
+        ),
+        (
+            "wb_plan_reply_question",
+            {"question_id": "question-1", "text": "Да, есть в наличии"},
+            "reply_question",
+        ),
+        (
+            "wb_plan_send_chat_message",
+            {"reply_sign": "chat-1", "message": "Здравствуйте"},
+            "send_chat_message",
+        ),
+        (
+            "wb_plan_deposit_campaign_budget",
+            {"campaign_id": 1, "amount": 3000},
+            "deposit_campaign_budget",
+        ),
+    ],
+)
+async def test_remaining_plan_tools_defer_one_named_write_until_apply(
+    tool_name: str,
+    payload: dict[str, object],
+    operation: str,
+) -> None:
+    gateway = RecordingGateway()
+    wb_server = server.create_server(token="test-token", gateway=gateway)
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        planned = await client.call_tool(tool_name, {"payload": payload})
+        assert planned.isError is False
+        assert planned.structuredContent is not None
+        assert gateway.calls == []
+        confirmation_id = planned.structuredContent["confirmation_id"]
+        assert isinstance(confirmation_id, str)
+
+        applied = await client.call_tool(
+            "wb_apply_change", {"confirmation_id": confirmation_id}
+        )
+
+    assert applied.isError is False
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0][:2] == ("write", operation)
+
+
+@pytest.mark.anyio
+async def test_plan_update_minus_phrases_allows_an_empty_list_to_clear_them() -> None:
+    gateway = RecordingGateway()
+    wb_server = server.create_server(token="test-token", gateway=gateway)
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        planned = await client.call_tool(
+            "wb_plan_update_minus_phrases",
+            {"payload": {"campaign_id": 1, "nm_id": 2, "phrases": []}},
+        )
+
+        assert planned.isError is False
+        assert gateway.calls == []
+        assert planned.structuredContent is not None
+        confirmation_id = planned.structuredContent["confirmation_id"]
+        assert isinstance(confirmation_id, str)
+
+        applied = await client.call_tool(
+            "wb_apply_change", {"confirmation_id": confirmation_id}
+        )
+
+    assert applied.isError is False
+    assert gateway.calls == [
+        (
+            "write",
+            "set_minus_phrases",
+            {"campaign_id": 1, "nm_id": 2, "phrases": []},
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_describe_operation_exposes_public_help_without_sdk_internals() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        result = await client.call_tool(
+            "wb_describe_operation", {"tool_name": "wb_get_campaign_stats"}
+        )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    assert result.structuredContent["tool"] == "wb_get_campaign_stats"
+    rendered = json.dumps(result.structuredContent, ensure_ascii=False)
+    assert "adv_" not in rendered
+    assert "api_" not in rendered
+
+
+@pytest.mark.anyio
+async def test_describe_operation_covers_catalog_and_confirmation_tools() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        catalog = await client.call_tool(
+            "wb_describe_operation", {"tool_name": "wb_list_cards"}
+        )
+        confirmation = await client.call_tool(
+            "wb_describe_operation", {"tool_name": "wb_plan_set_prices"}
+        )
+
+    assert catalog.structuredContent is not None
+    assert catalog.structuredContent["ok"] is True
+    assert catalog.structuredContent["tool"] == "wb_list_cards"
+    assert confirmation.structuredContent is not None
+    assert confirmation.structuredContent["plan_then_apply"] is True
+
+
+@pytest.mark.anyio
+async def test_every_exposed_tool_has_public_glm_help() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+
+    assert names == set(server._PUBLIC_OPERATION_HELP)

@@ -33,29 +33,33 @@
 | `tests/test_changes.py` | Confirmation safety lifecycle. |
 | `tests/test_gateway.py` | Dispatch, errors, serialization and SDK-token boundary. |
 | `tests/test_server.py` | Tool inventory and representative tool flows from every business domain. |
+| `tests/test_distribution.py` | Actual stdio handshake, deployment assets and routing-eval checks. |
 | `README.md` | Installation, token setup, tool catalog, Hermes configuration and verification. |
+| `deploy/run-wb-mcp.sh` | Root-only environment loader and stdio entry wrapper for Hermes. |
 | `deploy/hermes-wb-mcp.yaml.example` | Redacted sibling `mcp_servers.wb` configuration. |
+| `evals/glm-tool-routing.json` | Russian tool-routing cases for GLM/Hermes evaluation. |
 
 ## Tool inventory
 
 Read tools: `wb_get_seller_profile`, `wb_get_tariffs`, `wb_list_cards`,
 `wb_get_card_schema`, `wb_list_card_errors`, `wb_list_tags`, `wb_list_prices`,
 `wb_get_stocks`, `wb_list_warehouses`, `wb_list_orders`,
-`wb_get_order_details`, `wb_get_order_stickers`, `wb_list_supplies`,
-`wb_get_supply`, `wb_get_supply_barcode`, `wb_list_campaigns`,
-`wb_get_campaign`, `wb_get_campaign_stats`, `wb_get_campaign_bids`,
-`wb_get_search_clusters`, `wb_get_sales_funnel`, `wb_get_search_queries`,
-`wb_get_stock_analytics`, `wb_get_report_status`, `wb_get_balance`,
-`wb_list_financial_documents`, `wb_list_feedbacks`, `wb_list_questions`, and
-`wb_list_chats`.
+`wb_list_new_orders`, `wb_get_order_statuses`, `wb_get_order_stickers`,
+`wb_list_supplies`, `wb_get_supply`, `wb_get_supply_barcode`,
+`wb_list_campaigns`, `wb_get_campaign`, `wb_get_campaign_stats`,
+`wb_get_campaign_bids`, `wb_get_campaign_budget`, `wb_get_search_clusters`,
+`wb_get_sales_funnel`, `wb_get_search_queries`, `wb_get_stock_analytics`,
+`wb_get_report_status`, `wb_get_balance`, `wb_list_financial_documents`,
+`wb_list_feedbacks`, `wb_list_questions`, `wb_list_chats`, and
+`wb_list_chat_events`.
 
 Plan tools: `wb_plan_update_cards`, `wb_plan_save_media`,
 `wb_plan_set_prices`, `wb_plan_set_stocks`, `wb_plan_manage_warehouse`,
-`wb_plan_update_order_status`, `wb_plan_cancel_order`,
-`wb_plan_create_supply`, `wb_plan_update_supply`, `wb_plan_update_campaign`,
-`wb_plan_update_bids`, `wb_plan_update_minus_phrases`, `wb_plan_start_report`,
-`wb_plan_reply_feedback`, `wb_plan_reply_question`, and
-`wb_plan_send_chat_message`.
+`wb_plan_cancel_order`, `wb_plan_create_supply`, `wb_plan_update_supply`,
+`wb_plan_update_campaign`, `wb_plan_update_bids`,
+`wb_plan_update_minus_phrases`, `wb_plan_start_report`,
+`wb_plan_reply_feedback`, `wb_plan_reply_question`,
+`wb_plan_send_chat_message`, and `wb_plan_deposit_campaign_budget`.
 
 Control tools: `wb_describe_operation` and `wb_apply_change`.
 

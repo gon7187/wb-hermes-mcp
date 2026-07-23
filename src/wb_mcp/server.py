@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal, Protocol, cast
 
 from mcp import types as mcp_types
@@ -629,6 +629,291 @@ class ApplyChangeInput(PayloadModel):
     )
 
 
+class TariffsPayload(PayloadModel):
+    kind: Literal["commission", "box", "pallet", "return", "acceptance"] = Field(
+        default="commission",
+        description="Тип тарифа: комиссия, короб, паллета, возврат или коэффициенты приёмки.",
+        examples=["commission"],
+    )
+    locale: Literal["ru", "en", "zh"] | None = Field(
+        default="ru",
+        description="Язык комиссионного тарифа.",
+    )
+    date: StrictStr | None = Field(
+        default=None,
+        description="Дата YYYY-MM-DD для тарифов box/pallet/return.",
+        examples=["2026-07-23"],
+    )
+    warehouse_ids: list[StrictInt] | None = Field(
+        default=None,
+        max_length=50,
+        description="ID складов только для kind=acceptance.",
+    )
+
+    @model_validator(mode="after")
+    def require_valid_tariff_filter(self) -> TariffsPayload:
+        if self.kind in {"box", "pallet", "return"} and not self.date:
+            raise ValueError("date is required for the selected tariff kind")
+        if self.kind != "acceptance" and self.warehouse_ids is not None:
+            raise ValueError("warehouse_ids are only valid for acceptance tariffs")
+        return self
+
+
+class CampaignListPayload(PayloadModel):
+    campaign_ids: list[StrictInt] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+        description="До 50 ID кампаний для точечной выборки.",
+    )
+    statuses: list[StrictInt] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6,
+        description="Фильтр статусов кампаний WB.",
+    )
+    payment_type: Literal["cpm", "cpc"] | None = Field(
+        default=None,
+        description="Фильтр типа оплаты кампаний.",
+    )
+
+
+class CampaignIdPayload(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+
+
+class CampaignStatsPayload(PayloadModel):
+    campaign_ids: list[StrictInt] = Field(
+        min_length=1,
+        max_length=50,
+        description="До 50 ID кампаний.",
+        examples=[[123456]],
+    )
+    date_from: date = Field(
+        description="Начало периода статистики.", examples=["2026-07-01"]
+    )
+    date_to: date = Field(
+        description="Конец периода статистики.", examples=["2026-07-02"]
+    )
+
+    @model_validator(mode="after")
+    def check_period(self) -> CampaignStatsPayload:
+        if self.date_from > self.date_to:
+            raise ValueError("date_from must not be after date_to")
+        return self
+
+
+class CampaignBidsPayload(CampaignIdPayload):
+    nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
+
+
+class SearchClustersPayload(CampaignBidsPayload):
+    """Input for normalized search clusters of one campaign product."""
+
+
+class DateRangePayload(PayloadModel):
+    date_from: date = Field(description="Начало периода.", examples=["2026-07-01"])
+    date_to: date = Field(description="Конец периода.", examples=["2026-07-02"])
+
+    @model_validator(mode="after")
+    def check_date_range(self) -> DateRangePayload:
+        if self.date_from > self.date_to:
+            raise ValueError("date_from must not be after date_to")
+        return self
+
+
+class NmDateRangePayload(DateRangePayload):
+    nm_ids: list[StrictInt] = Field(
+        min_length=1,
+        max_length=1000,
+        description="Артикулы WB для фильтра аналитики.",
+        examples=[[987654321]],
+    )
+
+
+class SearchQueriesPayload(NmDateRangePayload):
+    limit: StrictInt = Field(default=100, ge=1, le=1000, description="Размер страницы.")
+    offset: StrictInt = Field(default=0, ge=0, description="Смещение страницы.")
+
+
+class StockAnalyticsPayload(NmDateRangePayload):
+    stock_type: Literal["", "wb", "mp"] = Field(
+        default="",
+        description="Тип остатков: все, WB или продавец.",
+    )
+
+
+class ReportStatusPayload(PayloadModel):
+    download_ids: list[StrictStr] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="UUID сформированных аналитических отчётов для точечной проверки.",
+    )
+
+
+class FinancialDocumentsPayload(PayloadModel):
+    locale: Literal["ru", "en", "zh"] | None = Field(default="ru")
+    begin_date: date | None = Field(
+        default=None, description="Начало периода документов."
+    )
+    end_date: date | None = Field(default=None, description="Конец периода документов.")
+    sort: Literal["date", "category"] | None = Field(default=None)
+    order: Literal["asc", "desc"] | None = Field(default=None)
+    category: StrictStr | None = Field(default=None)
+    limit: StrictInt | None = Field(default=50, ge=1, le=50)
+    offset: StrictInt | None = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def check_document_filters(self) -> FinancialDocumentsPayload:
+        if (self.begin_date is None) != (self.end_date is None):
+            raise ValueError("begin_date and end_date must be supplied together")
+        if (self.sort is None) != (self.order is None):
+            raise ValueError("sort and order must be supplied together")
+        if self.begin_date and self.end_date and self.begin_date > self.end_date:
+            raise ValueError("begin_date must not be after end_date")
+        return self
+
+
+class CommunicationListPayload(PayloadModel):
+    is_answered: StrictBool = Field(
+        default=False, description="Получить отвеченные или неотвеченные записи."
+    )
+    take: StrictInt = Field(default=100, ge=1, le=5000, description="Размер страницы.")
+    skip: StrictInt = Field(default=0, ge=0, description="Смещение страницы.")
+    nm_id: StrictInt | None = Field(default=None, description="Фильтр по артикулу WB.")
+    order: Literal["dateAsc", "dateDesc"] | None = Field(default="dateDesc")
+    date_from: StrictInt | None = Field(
+        default=None, ge=0, description="Unix timestamp начала периода."
+    )
+    date_to: StrictInt | None = Field(
+        default=None, ge=0, description="Unix timestamp конца периода."
+    )
+
+    @model_validator(mode="after")
+    def check_communication_dates(self) -> CommunicationListPayload:
+        if (
+            self.date_from is not None
+            and self.date_to is not None
+            and self.date_from > self.date_to
+        ):
+            raise ValueError("date_from must not be after date_to")
+        return self
+
+
+class ChatEventsPayload(PayloadModel):
+    next: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        description="Unix timestamp в миллисекундах для следующего пакета событий.",
+    )
+
+
+class CampaignUpdatePayload(PayloadModel):
+    action: Literal["create", "start", "pause", "stop", "rename"] = Field(
+        description="Действие над кампанией: создание, запуск, пауза, остановка или переименование.",
+        examples=["pause"],
+    )
+    campaign_id: StrictInt | None = Field(
+        default=None, description="ID существующей кампании."
+    )
+    name: StrictStr | None = Field(default=None, min_length=1, max_length=100)
+    nm_ids: list[StrictInt] | None = Field(default=None, min_length=1, max_length=50)
+    bid_type: Literal["manual", "unified"] = Field(default="manual")
+    payment_type: Literal["cpm", "cpc"] = Field(default="cpm")
+    placement_types: list[Literal["search", "recommendations"]] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2,
+    )
+
+    @model_validator(mode="after")
+    def check_campaign_action(self) -> CampaignUpdatePayload:
+        if self.action == "create":
+            if not self.name:
+                raise ValueError("name is required for campaign creation")
+            if self.campaign_id is not None:
+                raise ValueError("campaign_id is not valid for campaign creation")
+            return self
+        if self.campaign_id is None:
+            raise ValueError("campaign_id is required for this campaign action")
+        if self.action == "rename" and not self.name:
+            raise ValueError("name is required for campaign rename")
+        if self.action != "rename" and any(
+            value is not None
+            for value in (self.name, self.nm_ids, self.placement_types)
+        ):
+            raise ValueError(
+                "extra campaign fields are only valid for create or rename"
+            )
+        return self
+
+
+class CampaignBid(PayloadModel):
+    nm_id: StrictInt = Field(description="Артикул WB.")
+    bid_kopecks: StrictInt = Field(ge=0, description="Ставка в копейках.")
+    placement: Literal["search", "recommendations", "combined"] = Field(
+        description="Место показа ставки."
+    )
+
+
+class UpdateBidsPayload(CampaignIdPayload):
+    bids: list[CampaignBid] = Field(
+        min_length=1, max_length=100, description="Новые ставки товаров."
+    )
+
+
+class MinusPhrasesPayload(CampaignBidsPayload):
+    phrases: list[StrictStr] = Field(
+        max_length=1000,
+        description="Минус-фразы кампании; пустой список полностью очищает их.",
+    )
+
+
+class StartReportPayload(NmDateRangePayload):
+    name: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Необязательное имя отчёта.",
+    )
+
+
+class FeedbackReplyPayload(PayloadModel):
+    feedback_id: StrictStr = Field(min_length=1, description="ID отзыва.")
+    text: StrictStr = Field(
+        min_length=1, max_length=5000, description="Текст ответа на отзыв."
+    )
+
+
+class QuestionReplyPayload(PayloadModel):
+    question_id: StrictStr = Field(min_length=1, description="ID вопроса.")
+    text: StrictStr = Field(
+        min_length=1, max_length=5000, description="Текст ответа на вопрос."
+    )
+
+
+class ChatMessagePayload(PayloadModel):
+    reply_sign: StrictStr = Field(
+        min_length=1,
+        max_length=255,
+        description="Подпись чата из списка чатов или событий.",
+    )
+    message: StrictStr = Field(
+        min_length=1, max_length=1000, description="Текст сообщения покупателю."
+    )
+
+
+class CampaignBudgetDepositPayload(CampaignIdPayload):
+    amount: StrictInt = Field(
+        ge=1, description="Сумма пополнения в рублях.", examples=[3000]
+    )
+
+
+class DescribeOperationInput(PayloadModel):
+    tool_name: StrictStr = Field(description="Имя публичного инструмента wb_*.")
+
+
 READ_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -651,14 +936,6 @@ APPLY_ANNOTATIONS = ToolAnnotations(
 
 _VALIDATION_MESSAGE = (
     "Некорректные параметры инструмента. Проверьте структуру и обязательные поля."
-)
-_SECRET_KEY_PATTERN = re.compile(
-    r"token|secret|authorization|password|api[_-]?key|cookie|credential|private",
-    re.IGNORECASE,
-)
-_SECRET_VALUE_PATTERN = re.compile(
-    r"secret|token|authorization|bearer|api[_-]?key|password|cookie|credential",
-    re.IGNORECASE,
 )
 
 
@@ -821,33 +1098,143 @@ def _parse_payload(
         return None
 
 
-def _safe_summary_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _safe_summary_value(item)
-            for key, item in value.items()
-            if isinstance(key, str) and not _SECRET_KEY_PATTERN.search(key)
-        }
-    if isinstance(value, list | tuple):
-        return [_safe_summary_value(item) for item in value]
-    if isinstance(value, str):
-        return "[redacted]" if _SECRET_VALUE_PATTERN.search(value) else value
-    if value is None or isinstance(value, bool | int | float):
+_SUMMARY_TARGET_FIELDS = (
+    "nm_id",
+    "nmID",
+    "warehouse_id",
+    "order_id",
+    "supply_id",
+    "campaign_id",
+)
+_SUMMARY_SCALAR_FIELDS = frozenset(
+    {
+        "action",
+        "amount",
+        "bid_type",
+        "date_from",
+        "date_to",
+        "office_id",
+        "payment_type",
+        "stock_type",
+        "type",
+    }
+)
+_SUMMARY_ID_LIST_FIELDS = frozenset(
+    {"campaign_ids", "chrt_ids", "nm_ids", "order_ids", "warehouse_ids"}
+)
+_SUMMARY_OBJECT_LIST_FIELDS: dict[str, tuple[str, ...]] = {
+    "bids": ("nm_id", "bid_kopecks", "placement"),
+    "cards": ("nmID",),
+    "items": ("nmID", "price", "discount"),
+    "stocks": ("chrtId", "amount"),
+}
+_SUMMARY_COUNT_FIELDS = {
+    "mediaUrls": "media_urls_count",
+    "media_urls": "media_urls_count",
+    "phrases": "phrases_count",
+    "placement_types": "placement_types_count",
+}
+_SUMMARY_TEXT_FIELDS = frozenset({"message", "name", "text"})
+_SUMMARY_MAX_ITEMS = 20
+
+
+def _safe_summary_scalar(value: object) -> object | None:
+    if isinstance(value, date):
+        return value.isoformat()
+    if type(value) in (bool, int, float):
         return value
-    return "[redacted]"
+    if isinstance(value, str) and value in {
+        "combined",
+        "cpc",
+        "cpm",
+        "create",
+        "delete",
+        "deliver",
+        "manual",
+        "pause",
+        "recommendations",
+        "rename",
+        "search",
+        "start",
+        "stop",
+        "unified",
+    }:
+        return value
+    return None
+
+
+def _safe_summary_items(
+    value: object, fields: tuple[str, ...]
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, object]] = []
+    for item in value[:_SUMMARY_MAX_ITEMS]:
+        if not isinstance(item, Mapping):
+            continue
+        safe_item = {
+            field: safe_value
+            for field in fields
+            if (safe_value := _safe_summary_scalar(item.get(field))) is not None
+        }
+        if safe_item:
+            result.append(safe_item)
+    return result
+
+
+def _safe_plan_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in payload.items():
+        if key in _SUMMARY_TARGET_FIELDS:
+            continue
+        if key in _SUMMARY_SCALAR_FIELDS:
+            safe_value = _safe_summary_scalar(value)
+            if safe_value is not None:
+                result[key] = safe_value
+            continue
+        if key in _SUMMARY_ID_LIST_FIELDS:
+            if isinstance(value, list) and all(type(item) is int for item in value):
+                result[key] = value[:_SUMMARY_MAX_ITEMS]
+                if len(value) > _SUMMARY_MAX_ITEMS:
+                    result[f"{key}_count"] = len(value)
+            continue
+        if key in _SUMMARY_OBJECT_LIST_FIELDS:
+            if isinstance(value, list):
+                result[f"{key}_count"] = len(value)
+                safe_items = _safe_summary_items(
+                    value, _SUMMARY_OBJECT_LIST_FIELDS[key]
+                )
+                if safe_items:
+                    result[key] = safe_items
+            continue
+        if key in _SUMMARY_COUNT_FIELDS:
+            if isinstance(value, list):
+                result[_SUMMARY_COUNT_FIELDS[key]] = len(value)
+            continue
+        if key in _SUMMARY_TEXT_FIELDS and isinstance(value, str):
+            result[f"{key}_length"] = len(value)
+    return result
+
+
+def _safe_summary_target(key: str, value: object) -> dict[str, object] | None:
+    if type(value) is int:
+        return {key: value}
+    if key == "supply_id" and isinstance(value, str) and value.startswith("WB-"):
+        return {key: value[:128]}
+    return None
 
 
 def _plan_summary(operation: str, payload: Mapping[str, object]) -> dict[str, object]:
-    target_keys = ("nm_id", "nmID", "warehouse_id", "order_id", "supply_id")
     targets = [
-        {key: _safe_summary_value(payload[key])}
-        for key in target_keys
-        if key in payload and not _SECRET_KEY_PATTERN.search(key)
+        target
+        for key in _SUMMARY_TARGET_FIELDS
+        if key in payload
+        if (target := _safe_summary_target(key, payload[key])) is not None
     ]
     return {
         "operation": operation,
         "targets": targets,
-        "payload": _safe_summary_value(payload),
+        "payload": _safe_plan_payload(payload),
     }
 
 
@@ -885,6 +1272,413 @@ def _plan_result(plan: ChangePlan) -> dict[str, object]:
     }
 
 
+_PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
+    "wb_get_seller_profile": {
+        "description": "Возвращает профиль текущего продавца WB.",
+        "required_payload_keys": [],
+        "example": {},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_tariffs": {
+        "description": "Возвращает выбранный тариф или коэффициенты приёмки WB.",
+        "required_payload_keys": [],
+        "example": {"payload": {"kind": "commission"}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_campaigns": {
+        "description": "Возвращает кампании продвижения с необязательными фильтрами.",
+        "required_payload_keys": [],
+        "example": {"payload": {"statuses": [9]}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_campaign": {
+        "description": "Возвращает данные одной кампании по её ID.",
+        "required_payload_keys": ["campaign_id"],
+        "example": {"payload": {"campaign_id": 123456}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_campaign_stats": {
+        "description": "Возвращает статистику кампаний за указанный период.",
+        "required_payload_keys": ["campaign_ids", "date_from", "date_to"],
+        "example": {
+            "payload": {
+                "campaign_ids": [123456],
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+            }
+        },
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_campaign_bids": {
+        "description": "Возвращает рекомендуемые ставки товара в кампании.",
+        "required_payload_keys": ["campaign_id", "nm_id"],
+        "example": {"payload": {"campaign_id": 123456, "nm_id": 987654321}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_campaign_budget": {
+        "description": "Возвращает текущий бюджет кампании.",
+        "required_payload_keys": ["campaign_id"],
+        "example": {"payload": {"campaign_id": 123456}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_search_clusters": {
+        "description": "Возвращает нормализованные поисковые кластеры товара в кампании.",
+        "required_payload_keys": ["campaign_id", "nm_id"],
+        "example": {"payload": {"campaign_id": 123456, "nm_id": 987654321}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_sales_funnel": {
+        "description": "Возвращает воронку продаж по выбранным товарам и датам.",
+        "required_payload_keys": ["nm_ids", "date_from", "date_to"],
+        "example": {
+            "payload": {
+                "nm_ids": [987654321],
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+            }
+        },
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_search_queries": {
+        "description": "Возвращает поисковую аналитику товаров за период.",
+        "required_payload_keys": ["nm_ids", "date_from", "date_to"],
+        "example": {
+            "payload": {
+                "nm_ids": [987654321],
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+            }
+        },
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_stock_analytics": {
+        "description": "Возвращает аналитику остатков товаров за период.",
+        "required_payload_keys": ["nm_ids", "date_from", "date_to"],
+        "example": {
+            "payload": {
+                "nm_ids": [987654321],
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+            }
+        },
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_report_status": {
+        "description": "Возвращает статусы сформированных аналитических отчётов.",
+        "required_payload_keys": [],
+        "example": {},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_balance": {
+        "description": "Возвращает баланс финансового аккаунта продавца.",
+        "required_payload_keys": [],
+        "example": {},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_financial_documents": {
+        "description": "Возвращает финансовые документы с фильтрами периода и категории.",
+        "required_payload_keys": [],
+        "example": {"payload": {"limit": 50, "offset": 0}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_feedbacks": {
+        "description": "Возвращает отзывы покупателей с фильтром по обработанности.",
+        "required_payload_keys": [],
+        "example": {"payload": {"is_answered": False, "take": 100, "skip": 0}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_questions": {
+        "description": "Возвращает вопросы покупателей с фильтром по обработанности.",
+        "required_payload_keys": [],
+        "example": {"payload": {"is_answered": False, "take": 100, "skip": 0}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_chats": {
+        "description": "Возвращает доступные чаты с покупателями.",
+        "required_payload_keys": [],
+        "example": {},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_list_chat_events": {
+        "description": "Возвращает новые события чатов с покупателями.",
+        "required_payload_keys": [],
+        "example": {},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_plan_update_campaign": {
+        "description": "Создаёт план создания, запуска, паузы, остановки или переименования кампании.",
+        "required_payload_keys": ["action"],
+        "example": {"payload": {"action": "pause", "campaign_id": 123456}},
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_update_bids": {
+        "description": "Создаёт план изменения ставок кампании в копейках.",
+        "required_payload_keys": ["campaign_id", "bids"],
+        "example": {
+            "payload": {
+                "campaign_id": 123456,
+                "bids": [
+                    {"nm_id": 987654321, "bid_kopecks": 10000, "placement": "search"}
+                ],
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_update_minus_phrases": {
+        "description": (
+            "Создаёт план полной установки минус-фраз товара в кампании; "
+            "пустой список очищает их все."
+        ),
+        "required_payload_keys": ["campaign_id", "nm_id", "phrases"],
+        "example": {
+            "payload": {
+                "campaign_id": 123456,
+                "nm_id": 987654321,
+                "phrases": ["нецелевой запрос"],
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_start_report": {
+        "description": "Создаёт план запуска выгрузки отчёта воронки продаж.",
+        "required_payload_keys": ["nm_ids", "date_from", "date_to"],
+        "example": {
+            "payload": {
+                "nm_ids": [987654321],
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_reply_feedback": {
+        "description": "Создаёт план отправки ответа на отзыв покупателя.",
+        "required_payload_keys": ["feedback_id", "text"],
+        "example": {
+            "payload": {"feedback_id": "feedback-id", "text": "Спасибо за отзыв"}
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_reply_question": {
+        "description": "Создаёт план ответа на вопрос покупателя.",
+        "required_payload_keys": ["question_id", "text"],
+        "example": {
+            "payload": {"question_id": "question-id", "text": "Да, есть в наличии"}
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_send_chat_message": {
+        "description": "Создаёт план отправки текстового сообщения покупателю в чат.",
+        "required_payload_keys": ["reply_sign", "message"],
+        "example": {"payload": {"reply_sign": "chat-sign", "message": "Здравствуйте"}},
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_deposit_campaign_budget": {
+        "description": "Создаёт план пополнения бюджета кампании в рублях.",
+        "required_payload_keys": ["campaign_id", "amount"],
+        "example": {"payload": {"campaign_id": 123456, "amount": 3000}},
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+}
+
+
+def _public_help(
+    description: str,
+    required_payload_keys: list[str],
+    example: dict[str, object],
+    *,
+    mutation: bool = False,
+) -> dict[str, object]:
+    return {
+        "description": description,
+        "required_payload_keys": required_payload_keys,
+        "example": example,
+        "mutation": mutation,
+        "plan_then_apply": mutation,
+    }
+
+
+_PUBLIC_OPERATION_HELP.update(
+    {
+        "wb_list_cards": _public_help(
+            "Возвращает постраничный список карточек товара.",
+            [],
+            {"payload": {"settings": {"cursor": {"limit": 10}}}},
+        ),
+        "wb_get_card_schema": _public_help(
+            "Возвращает категории, предметы или характеристики карточек.",
+            [],
+            {"payload": {"subject_id": 105}},
+        ),
+        "wb_list_card_errors": _public_help(
+            "Возвращает постраничные ошибки карточек.",
+            [],
+            {"payload": {"cursor": {"limit": 100}}},
+        ),
+        "wb_list_tags": _public_help("Возвращает ярлыки карточек продавца.", [], {}),
+        "wb_list_prices": _public_help(
+            "Возвращает цены и скидки товаров.",
+            [],
+            {"payload": {"limit": 100, "offset": 0}},
+        ),
+        "wb_get_stocks": _public_help(
+            "Возвращает остатки выбранных размеров на складе продавца.",
+            ["warehouse_id", "chrt_ids"],
+            {"payload": {"warehouse_id": 12345, "chrt_ids": [123456]}},
+        ),
+        "wb_list_warehouses": _public_help("Возвращает склады продавца.", [], {}),
+        "wb_list_orders": _public_help(
+            "Возвращает постраничные FBS-заказы.",
+            [],
+            {"payload": {"limit": 100, "next": 0}},
+        ),
+        "wb_list_new_orders": _public_help(
+            "Возвращает список новых FBS-заказов.", [], {}
+        ),
+        "wb_get_order_statuses": _public_help(
+            "Возвращает текущие статусы FBS-заказов.",
+            ["order_ids"],
+            {"payload": {"order_ids": [12345678]}},
+        ),
+        "wb_get_order_stickers": _public_help(
+            "Генерирует стикеры FBS-заказов.",
+            ["type", "width", "height", "order_ids"],
+            {
+                "payload": {
+                    "type": "png",
+                    "width": 58,
+                    "height": 40,
+                    "order_ids": [12345678],
+                }
+            },
+        ),
+        "wb_list_supplies": _public_help(
+            "Возвращает постраничные FBS-поставки.",
+            [],
+            {"payload": {"limit": 100, "next": 0}},
+        ),
+        "wb_get_supply": _public_help(
+            "Возвращает одну FBS-поставку.",
+            ["supply_id"],
+            {"payload": {"supply_id": "WB-GI-123456"}},
+        ),
+        "wb_get_supply_barcode": _public_help(
+            "Возвращает стикер FBS-поставки.",
+            ["supply_id", "type"],
+            {"payload": {"supply_id": "WB-GI-123456", "type": "png"}},
+        ),
+        "wb_plan_update_cards": _public_help(
+            "Создаёт план обновления карточек.",
+            ["cards"],
+            {"payload": {"cards": [{"nmID": 987654321}]}},
+            mutation=True,
+        ),
+        "wb_plan_save_media": _public_help(
+            "Создаёт план полной замены медиа карточки.",
+            ["nm_id", "media_urls"],
+            {
+                "payload": {
+                    "nm_id": 987654321,
+                    "media_urls": ["https://example.invalid/image.jpg"],
+                }
+            },
+            mutation=True,
+        ),
+        "wb_plan_set_prices": _public_help(
+            "Создаёт план изменения цен и скидок.",
+            ["items"],
+            {"payload": {"items": [{"nmID": 987654321, "price": 999, "discount": 10}]}},
+            mutation=True,
+        ),
+        "wb_plan_set_stocks": _public_help(
+            "Создаёт план записи остатков на складе.",
+            ["warehouse_id", "stocks"],
+            {
+                "payload": {
+                    "warehouse_id": 12345,
+                    "stocks": [{"chrtId": 123456, "amount": 10}],
+                }
+            },
+            mutation=True,
+        ),
+        "wb_plan_manage_warehouse": _public_help(
+            "Создаёт план создания, изменения или удаления склада.",
+            ["action"],
+            {"payload": {"action": "create", "name": "Основной", "office_id": 12345}},
+            mutation=True,
+        ),
+        "wb_plan_cancel_order": _public_help(
+            "Создаёт план отмены FBS-заказа.",
+            ["order_id"],
+            {"payload": {"order_id": 12345678}},
+            mutation=True,
+        ),
+        "wb_plan_create_supply": _public_help(
+            "Создаёт план создания FBS-поставки.",
+            ["name"],
+            {"payload": {"name": "Поставка 2026-07-23"}},
+            mutation=True,
+        ),
+        "wb_plan_update_supply": _public_help(
+            "Создаёт план добавления заказов, сдачи или удаления FBS-поставки.",
+            ["action", "supply_id"],
+            {
+                "payload": {
+                    "action": "attach_orders",
+                    "supply_id": "WB-GI-123456",
+                    "order_ids": [12345678],
+                }
+            },
+            mutation=True,
+        ),
+        "wb_apply_change": _public_help(
+            "Однократно применяет подтверждённый ранее план.",
+            ["confirmation_id"],
+            {"confirmation_id": "confirmation-id"},
+            mutation=True,
+        ),
+        "wb_describe_operation": _public_help(
+            "Возвращает публичную справку об инструменте.",
+            ["tool_name"],
+            {"tool_name": "wb_list_cards"},
+        ),
+    }
+)
+
+
+def _operation_help(tool_name: str) -> dict[str, object] | None:
+    details = _PUBLIC_OPERATION_HELP.get(tool_name)
+    if details is None:
+        return None
+    return {"ok": True, "tool": tool_name, **details}
+
+
 def create_server(
     token: str | None = None,
     *,
@@ -915,6 +1709,44 @@ def create_server(
             return _plan_result(plans.create(operation, canonical_payload))
         except WBError as error:
             return _gateway_error(error)
+
+    @mcp.tool(
+        name="wb_get_seller_profile",
+        description="Возвращает профиль текущего продавца Wildberries.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_seller_profile(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("seller_profile", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_tariffs",
+        description=(
+            "Возвращает тариф WB: commission, box, pallet, return или acceptance. "
+            "Для box/pallet/return обязательна дата YYYY-MM-DD."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_tariffs(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, TariffsPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        tariffs = cast(TariffsPayload, parsed)
+        raw = _as_payload(tariffs)
+        if tariffs.kind == "commission":
+            return read_tool("tariffs_commission", {"locale": raw.get("locale")})
+        if tariffs.kind == "acceptance":
+            return read_tool(
+                "acceptance_coefficients",
+                {"warehouse_ids": raw["warehouse_ids"]}
+                if "warehouse_ids" in raw
+                else {},
+            )
+        return read_tool(f"tariffs_{tariffs.kind}", {"date": raw["date"]})
 
     @mcp.tool(
         name="wb_list_cards",
@@ -1288,6 +2120,383 @@ def create_server(
         return plan_tool("delete_supply", {"supply_id": raw["supply_id"]})
 
     @mcp.tool(
+        name="wb_list_campaigns",
+        description=(
+            "Возвращает кампании продвижения WB. Можно фильтровать до 50 campaign_ids, "
+            "статусами и типом оплаты."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_campaigns(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignListPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("list_campaigns", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_campaign",
+        description="Возвращает данные одной кампании WB по campaign_id.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_campaign(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignIdPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("get_campaign", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_campaign_stats",
+        description="Возвращает дневную статистику до 50 кампаний WB за указанный период.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_campaign_stats(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignStatsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("campaign_stats", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_campaign_bids",
+        description="Возвращает рекомендованные ставки одного товара в кампании WB.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_campaign_bids(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignBidsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("campaign_bids", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_campaign_budget",
+        description="Возвращает текущий бюджет кампании WB по campaign_id.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_campaign_budget(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignIdPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("campaign_budget", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_search_clusters",
+        description=(
+            "Возвращает нормализованные поисковые кластеры одного товара в кампании WB. "
+            "Используйте результат перед изменением минус-фраз или ставок."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_search_clusters(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SearchClustersPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("search_clusters", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_sales_funnel",
+        description="Возвращает воронку продаж WB по товарам и выбранному периоду.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_sales_funnel(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, NmDateRangePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("sales_funnel", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_search_queries",
+        description=(
+            "Возвращает поисковую аналитику WB по товарам и датам. Ответ постраничный; "
+            "используйте limit и offset."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_search_queries(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SearchQueriesPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("search_queries", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_stock_analytics",
+        description="Возвращает аналитику остатков WB по товарам и периоду.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_stock_analytics(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, StockAnalyticsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("stock_analytics", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_report_status",
+        description=(
+            "Возвращает статусы асинхронных аналитических отчётов WB. Без download_ids "
+            "возвращает доступные отчёты."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_report_status(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ReportStatusPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("report_status", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_balance",
+        description="Возвращает баланс финансового аккаунта текущего продавца WB.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_balance(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("balance", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_list_financial_documents",
+        description=(
+            "Возвращает финансовые документы WB. Фильтры begin_date/end_date, sort и "
+            "order используются парами; limit не больше 50."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_financial_documents(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, FinancialDocumentsPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("financial_documents", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_list_feedbacks",
+        description="Возвращает отзывы покупателей WB; по умолчанию неотвеченные.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_feedbacks(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CommunicationListPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("feedbacks", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_list_questions",
+        description="Возвращает вопросы покупателей WB; по умолчанию неотвеченные.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_questions(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CommunicationListPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("questions", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_list_chats",
+        description="Возвращает чаты текущего продавца WB с покупателями.",
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_chats(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("chats", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_list_chat_events",
+        description=(
+            "Возвращает события чатов с покупателями WB. Для следующей страницы передайте "
+            "next из предыдущего ответа."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_list_chat_events(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ChatEventsPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("chat_events", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_update_campaign",
+        description=(
+            "Создаёт подтверждаемый план создания, запуска, паузы, остановки или "
+            "переименования кампании WB. Для action=create по умолчанию manual CPM "
+            "с размещением search/recommendations; WB не вызывается до применения."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_campaign(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignUpdatePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        campaign = cast(CampaignUpdatePayload, parsed)
+        raw = _as_payload(campaign)
+        if campaign.action == "create":
+            return plan_tool(
+                "create_campaign",
+                {
+                    key: raw[key]
+                    for key in (
+                        "name",
+                        "nm_ids",
+                        "bid_type",
+                        "payment_type",
+                        "placement_types",
+                    )
+                    if key in raw
+                },
+            )
+        if campaign.action == "rename":
+            return plan_tool(
+                "rename_campaign",
+                {"campaign_id": raw["campaign_id"], "name": raw["name"]},
+            )
+        return plan_tool(
+            f"{campaign.action}_campaign", {"campaign_id": raw["campaign_id"]}
+        )
+
+    @mcp.tool(
+        name="wb_plan_update_bids",
+        description=(
+            "Создаёт подтверждаемый план изменения ставок кампании WB. bid_kopecks — "
+            "ставка в копейках, placement определяет зону показа."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_bids(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdateBidsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("update_bids", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_update_minus_phrases",
+        description=(
+            "Создаёт подтверждаемый план полной установки минус-фраз одного товара в "
+            "кампании WB. Пустой список очищает все минус-фразы. Перед применением "
+            "сначала изучите wb_get_search_clusters."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_minus_phrases(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, MinusPhrasesPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("set_minus_phrases", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_start_report",
+        description=(
+            "Создаёт подтверждаемый план запуска отчёта воронки продаж WB. После "
+            "применения проверяйте готовность через wb_get_report_status."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_start_report(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, StartReportPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("start_report", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_reply_feedback",
+        description="Создаёт подтверждаемый план публикации ответа на отзыв покупателя WB.",
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_reply_feedback(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, FeedbackReplyPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("reply_feedback", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_reply_question",
+        description="Создаёт подтверждаемый план публикации ответа на вопрос покупателя WB.",
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_reply_question(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, QuestionReplyPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("reply_question", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_send_chat_message",
+        description=(
+            "Создаёт подтверждаемый план отправки текстового сообщения покупателю WB. "
+            "reply_sign берите из wb_list_chats или wb_list_chat_events."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_send_chat_message(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ChatMessagePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("send_chat_message", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_deposit_campaign_budget",
+        description=(
+            "Создаёт подтверждаемый финансовый план пополнения бюджета кампании WB. "
+            "amount указан в рублях; перед применением проверьте wb_get_campaign_budget."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_deposit_campaign_budget(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, CampaignBudgetDepositPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("deposit_campaign_budget", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_describe_operation",
+        description=(
+            "Объясняет публичный инструмент WB: обязательные ключи payload, пример и "
+            "нужен ли этап plan → wb_apply_change. Не раскрывает детали SDK."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_describe_operation(tool_name: object = None) -> dict[str, object]:
+        parsed = _parse_payload(
+            {"tool_name": tool_name}, DescribeOperationInput, optional=False
+        )
+        if parsed is None:
+            return _validation_error()
+        details = _operation_help(cast(DescribeOperationInput, parsed).tool_name)
+        if details is not None:
+            return details
+        return {
+            "ok": False,
+            "error": {
+                "kind": "unknown_tool",
+                "message": "Неизвестный публичный инструмент WB.",
+                "retryable": False,
+            },
+        }
+
+    @mcp.tool(
         name="wb_apply_change",
         description=(
             "Однократно применяет ранее созданный план по confirmation_id. После попытки "
@@ -1318,6 +2527,8 @@ def create_server(
             "result": result,
         }
 
+    mcp.register_payload_input("wb_get_seller_profile", EmptyPayload, required=False)
+    mcp.register_payload_input("wb_get_tariffs", TariffsPayload, required=False)
     mcp.register_payload_input("wb_list_cards", ListCardsPayload, required=False)
     mcp.register_payload_input("wb_get_card_schema", CardSchemaPayload, required=False)
     mcp.register_payload_input("wb_list_card_errors", CardErrorsPayload, required=False)
@@ -1356,6 +2567,67 @@ def create_server(
     mcp.register_payload_input(
         "wb_plan_update_supply", UpdateSupplyPayload, required=True
     )
+    mcp.register_payload_input("wb_list_campaigns", CampaignListPayload, required=False)
+    mcp.register_payload_input("wb_get_campaign", CampaignIdPayload, required=True)
+    mcp.register_payload_input(
+        "wb_get_campaign_stats", CampaignStatsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_campaign_bids", CampaignBidsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_campaign_budget", CampaignIdPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_search_clusters", SearchClustersPayload, required=True
+    )
+    mcp.register_payload_input("wb_get_sales_funnel", NmDateRangePayload, required=True)
+    mcp.register_payload_input(
+        "wb_get_search_queries", SearchQueriesPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_stock_analytics", StockAnalyticsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_report_status", ReportStatusPayload, required=False
+    )
+    mcp.register_payload_input("wb_get_balance", EmptyPayload, required=False)
+    mcp.register_payload_input(
+        "wb_list_financial_documents", FinancialDocumentsPayload, required=False
+    )
+    mcp.register_payload_input(
+        "wb_list_feedbacks", CommunicationListPayload, required=False
+    )
+    mcp.register_payload_input(
+        "wb_list_questions", CommunicationListPayload, required=False
+    )
+    mcp.register_payload_input("wb_list_chats", EmptyPayload, required=False)
+    mcp.register_payload_input("wb_list_chat_events", ChatEventsPayload, required=False)
+    mcp.register_payload_input(
+        "wb_plan_update_campaign", CampaignUpdatePayload, required=True
+    )
+    mcp.register_payload_input("wb_plan_update_bids", UpdateBidsPayload, required=True)
+    mcp.register_payload_input(
+        "wb_plan_update_minus_phrases", MinusPhrasesPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_start_report", StartReportPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_reply_feedback", FeedbackReplyPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_reply_question", QuestionReplyPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_send_chat_message", ChatMessagePayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_deposit_campaign_budget",
+        CampaignBudgetDepositPayload,
+        required=True,
+    )
+    mcp.register_root_input("wb_describe_operation", DescribeOperationInput)
     mcp.register_root_input("wb_apply_change", ApplyChangeInput)
 
     return mcp

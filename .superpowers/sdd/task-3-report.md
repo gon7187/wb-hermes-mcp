@@ -67,3 +67,10 @@
   single-order alias. The final Task 3 surface is 14 read tools, 8 plan tools,
   and the shared `wb_apply_change` control tool; `wb_list_new_orders` and
   `wb_get_order_statuses` are both read-only.
+
+## Clarification
+
+The older "Intentional SDK limits" paragraph above is superseded for FBS
+orders: `wb_get_order_details` is not registered at all. The actual safe
+surface is `wb_list_orders`, `wb_list_new_orders`, and
+`wb_get_order_statuses`, each backed by a real read-only SDK method.

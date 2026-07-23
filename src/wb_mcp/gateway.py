@@ -9,10 +9,19 @@ from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import Final, TypeAlias, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
-from wildberries_sdk import general, items, orders_fbs
+from wildberries_sdk import (
+    analytics,
+    communications,
+    finances,
+    general,
+    items,
+    orders_fbs,
+    promotion,
+    rates,
+)
 
 
 JsonValue: TypeAlias = (
@@ -354,6 +363,378 @@ def _adapt_supply_id(payload: Mapping[str, object]) -> Mapping[str, object]:
     return {"supply_id": _require_str(payload, "supply_id")}
 
 
+def _require_date(payload: Mapping[str, object], key: str) -> date:
+    value = _require_value(payload, key)
+    if not isinstance(value, date):
+        raise ValueError("payload field must be a date")
+    return value
+
+
+def _adapt_tariffs_commission(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"locale"})
+    return _copy_optional({}, payload, "locale")
+
+
+def _adapt_tariffs_by_date(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"date"})
+    value = _require_value(payload, "date")
+    if not isinstance(value, str) or not value:
+        raise ValueError("tariff date is invalid")
+    return {"var_date": value}
+
+
+def _adapt_acceptance_coefficients(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    _allow_only(payload, {"warehouse_ids"})
+    warehouse_ids = payload.get("warehouse_ids")
+    if warehouse_ids is None:
+        return {}
+    if not isinstance(warehouse_ids, list) or not all(
+        type(warehouse_id) is int for warehouse_id in warehouse_ids
+    ):
+        raise ValueError("warehouse IDs are invalid")
+    return {
+        "warehouse_ids": ",".join(str(warehouse_id) for warehouse_id in warehouse_ids)
+    }
+
+
+def _join_ints(values: object, *, field: str, maximum: int = 50) -> str:
+    if not isinstance(values, list) or not values or len(values) > maximum:
+        raise ValueError(f"{field} are invalid")
+    if not all(type(value) is int for value in values):
+        raise ValueError(f"{field} are invalid")
+    return ",".join(str(value) for value in values)
+
+
+def _adapt_list_campaigns(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_ids", "statuses", "payment_type"})
+    arguments: dict[str, object] = {}
+    if "campaign_ids" in payload:
+        arguments["ids"] = _join_ints(payload["campaign_ids"], field="campaign IDs")
+    if "statuses" in payload:
+        arguments["statuses"] = _join_ints(
+            payload["statuses"], field="campaign statuses"
+        )
+    return _copy_optional(arguments, payload, "payment_type")
+
+
+def _adapt_get_campaign(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id"})
+    return {"ids": str(_require_int(payload, "campaign_id"))}
+
+
+def _adapt_campaign_stats(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_ids", "date_from", "date_to"})
+    return {
+        "ids": _join_ints(payload.get("campaign_ids"), field="campaign IDs"),
+        "begin_date": _require_date(payload, "date_from"),
+        "end_date": _require_date(payload, "date_to"),
+    }
+
+
+def _adapt_campaign_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "nm_id"})
+    return {
+        "advert_id": _require_int(payload, "campaign_id"),
+        "nm_id": _require_int(payload, "nm_id"),
+    }
+
+
+def _adapt_campaign_id(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id"})
+    return {"id": _require_int(payload, "campaign_id")}
+
+
+def _adapt_search_clusters(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "nm_id"})
+    request = promotion.V0GetNormQueryListRequest.model_validate(
+        {
+            "items": [
+                {
+                    "advertId": _require_int(payload, "campaign_id"),
+                    "nmId": _require_int(payload, "nm_id"),
+                }
+            ]
+        }
+    )
+    return {"v0_get_norm_query_list_request": request}
+
+
+def _adapt_sales_funnel(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"nm_ids", "date_from", "date_to"})
+    request = analytics.ItemsRequest.model_validate(
+        {
+            "selectedPeriod": {
+                "start": _require_date(payload, "date_from"),
+                "end": _require_date(payload, "date_to"),
+            },
+            "nmIds": _require_list(payload, "nm_ids"),
+        }
+    )
+    return {"items_request": request}
+
+
+def _adapt_search_queries(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"nm_ids", "date_from", "date_to", "limit", "offset"})
+    request = analytics.MainRequest.model_validate(
+        {
+            "currentPeriod": {
+                "start": _require_date(payload, "date_from"),
+                "end": _require_date(payload, "date_to"),
+            },
+            "nmIds": _require_list(payload, "nm_ids"),
+            "positionCluster": "all",
+            "orderBy": {"field": "avgPosition", "mode": "asc"},
+            "limit": payload.get("limit", 100),
+            "offset": payload.get("offset", 0),
+        }
+    )
+    return {"main_request": request}
+
+
+def _adapt_stock_analytics(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"nm_ids", "date_from", "date_to", "stock_type"})
+    request = analytics.CommonShippingOfficeFilters.model_validate(
+        {
+            "nmIDs": _require_list(payload, "nm_ids"),
+            "currentPeriod": {
+                "start": _require_date(payload, "date_from"),
+                "end": _require_date(payload, "date_to"),
+            },
+            "stockType": payload.get("stock_type", ""),
+            "skipDeletedNm": False,
+        }
+    )
+    return {"body": request}
+
+
+def _adapt_report_status(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"download_ids"})
+    raw_ids = payload.get("download_ids")
+    if raw_ids is None:
+        return {}
+    if not isinstance(raw_ids, list):
+        raise ValueError("report download IDs are invalid")
+    try:
+        return {"filter_download_ids": [UUID(str(value)) for value in raw_ids]}
+    except (TypeError, ValueError) as error:
+        raise ValueError("report download IDs are invalid") from error
+
+
+def _adapt_financial_documents(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(
+        payload,
+        {
+            "locale",
+            "begin_date",
+            "end_date",
+            "sort",
+            "order",
+            "category",
+            "limit",
+            "offset",
+        },
+    )
+    arguments = _copy_optional(
+        {},
+        payload,
+        "locale",
+        "sort",
+        "order",
+        "category",
+        "limit",
+        "offset",
+    )
+    if "begin_date" in payload:
+        arguments["begin_time"] = payload["begin_date"]
+    if "end_date" in payload:
+        arguments["end_time"] = payload["end_date"]
+    return arguments
+
+
+def _adapt_feedbacks(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(
+        payload,
+        {"is_answered", "take", "skip", "nm_id", "order", "date_from", "date_to"},
+    )
+    return _copy_optional(
+        {
+            "is_answered": payload.get("is_answered", False),
+            "take": payload.get("take", 100),
+            "skip": payload.get("skip", 0),
+        },
+        payload,
+        "nm_id",
+        "order",
+        "date_from",
+        "date_to",
+    )
+
+
+def _adapt_questions(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(
+        payload,
+        {"is_answered", "take", "skip", "nm_id", "order", "date_from", "date_to"},
+    )
+    return _copy_optional(
+        {
+            "is_answered": payload.get("is_answered", False),
+            "take": payload.get("take", 100),
+            "skip": payload.get("skip", 0),
+        },
+        payload,
+        "nm_id",
+        "order",
+        "date_from",
+        "date_to",
+    )
+
+
+def _adapt_chat_events(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"next"})
+    return _copy_optional({}, payload, "next")
+
+
+def _adapt_create_campaign(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(
+        payload, {"name", "nm_ids", "bid_type", "payment_type", "placement_types"}
+    )
+    bid_type = payload.get("bid_type", "manual")
+    placement_types = payload.get("placement_types")
+    if bid_type == "manual" and placement_types is None:
+        placement_types = ["search", "recommendations"]
+    if bid_type == "unified" and placement_types is not None:
+        raise ValueError("unified campaign cannot set placement types")
+    request = promotion.AdvV2SeacatSaveAdPostRequest.model_validate(
+        {
+            "name": _require_str(payload, "name"),
+            "nms": payload.get("nm_ids"),
+            "bid_type": bid_type,
+            "payment_type": payload.get("payment_type", "cpm"),
+            "placement_types": placement_types,
+        }
+    )
+    return {"adv_v2_seacat_save_ad_post_request": request}
+
+
+def _adapt_rename_campaign(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "name"})
+    request = promotion.AdvV0RenamePostRequest.model_validate(
+        {
+            "advertId": _require_int(payload, "campaign_id"),
+            "name": _require_str(payload, "name"),
+        }
+    )
+    return {"adv_v0_rename_post_request": request}
+
+
+def _adapt_update_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "bids"})
+    bids = _require_list(payload, "bids")
+    if not bids:
+        raise ValueError("campaign bids must not be empty")
+    request = promotion.ApiAdvertV1BidsPatchRequest.model_validate(
+        {
+            "bids": [
+                {
+                    "advert_id": _require_int(payload, "campaign_id"),
+                    "nm_bids": bids,
+                }
+            ]
+        }
+    )
+    return {"api_advert_v1_bids_patch_request": request}
+
+
+def _adapt_set_minus_phrases(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "nm_id", "phrases"})
+    phrases = _require_list(payload, "phrases")
+    if not all(isinstance(phrase, str) and phrase for phrase in phrases):
+        raise ValueError("minus phrases are invalid")
+    request = promotion.V0SetMinusNormQueryRequest.model_validate(
+        {
+            "advert_id": _require_int(payload, "campaign_id"),
+            "nm_id": _require_int(payload, "nm_id"),
+            "norm_queries": phrases,
+        }
+    )
+    return {"v0_set_minus_norm_query_request": request}
+
+
+def _adapt_start_report(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"nm_ids", "date_from", "date_to", "name"})
+    raw_name = payload.get("name")
+    if raw_name is not None and not isinstance(raw_name, str):
+        raise ValueError("report name is invalid")
+    raw_nm_ids = _require_list(payload, "nm_ids")
+    if not raw_nm_ids or not all(type(nm_id) is int for nm_id in raw_nm_ids):
+        raise ValueError("report nm IDs are invalid")
+    report = analytics.SalesFunnelItemReq(
+        id=uuid4(),
+        reportType="DETAIL_HISTORY_REPORT",
+        userReportName=raw_name,
+        params=analytics.SalesFunnelItemReqParams(
+            nmIDs=cast(list[int], raw_nm_ids),
+            startDate=_require_date(payload, "date_from"),
+            endDate=_require_date(payload, "date_to"),
+        ),
+    )
+    return {
+        "api_v2_nm_report_downloads_post_request": analytics.ApiV2NmReportDownloadsPostRequest(
+            report
+        )
+    }
+
+
+def _adapt_reply_feedback(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"feedback_id", "text"})
+    request = communications.ApiV1FeedbacksAnswerPostRequest.model_validate(
+        {
+            "id": _require_str(payload, "feedback_id"),
+            "text": _require_str(payload, "text"),
+        }
+    )
+    return {"api_v1_feedbacks_answer_post_request": request}
+
+
+def _adapt_reply_question(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"question_id", "text"})
+    answer = communications.ApiV1QuestionsPatchRequestOneOf1.model_validate(
+        {
+            "id": _require_str(payload, "question_id"),
+            "answer": {"text": _require_str(payload, "text")},
+            "state": "wbRu",
+        }
+    )
+    return {
+        "api_v1_questions_patch_request": communications.ApiV1QuestionsPatchRequest(
+            answer
+        )
+    }
+
+
+def _adapt_send_chat_message(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"reply_sign", "message"})
+    return {
+        "reply_sign": _require_str(payload, "reply_sign"),
+        "message": _require_str(payload, "message"),
+    }
+
+
+def _adapt_deposit_campaign_budget(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    _allow_only(payload, {"campaign_id", "amount"})
+    request = promotion.AdvV1BudgetDepositPostRequest.model_validate(
+        {"sum": _require_int(payload, "amount")}
+    )
+    return {
+        "id": _require_int(payload, "campaign_id"),
+        "adv_v1_budget_deposit_post_request": request,
+    }
+
+
 OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
     {
         "seller_profile": Operation(
@@ -513,6 +894,183 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             mutation=True,
             payload_adapter=_adapt_supply_id,
         ),
+        "tariffs_commission": Operation(
+            client="rates",
+            method="get_v1_tariffs_commission",
+            payload_adapter=_adapt_tariffs_commission,
+        ),
+        "tariffs_box": Operation(
+            client="rates",
+            method="get_v1_tariffs_box",
+            payload_adapter=_adapt_tariffs_by_date,
+        ),
+        "tariffs_pallet": Operation(
+            client="rates",
+            method="get_v1_tariffs_pallet",
+            payload_adapter=_adapt_tariffs_by_date,
+        ),
+        "tariffs_return": Operation(
+            client="rates",
+            method="get_v1_tariffs_return",
+            payload_adapter=_adapt_tariffs_by_date,
+        ),
+        "acceptance_coefficients": Operation(
+            client="rates",
+            method="get_v1_acceptance_coefficients",
+            payload_adapter=_adapt_acceptance_coefficients,
+        ),
+        "list_campaigns": Operation(
+            client="promotion",
+            method="api_advert_v2_adverts_get",
+            payload_adapter=_adapt_list_campaigns,
+        ),
+        "get_campaign": Operation(
+            client="promotion",
+            method="api_advert_v2_adverts_get",
+            payload_adapter=_adapt_get_campaign,
+        ),
+        "campaign_stats": Operation(
+            client="promotion",
+            method="adv_v3_fullstats_get",
+            payload_adapter=_adapt_campaign_stats,
+        ),
+        "campaign_bids": Operation(
+            client="promotion",
+            method="api_advert_v0_bids_recommendations_get",
+            payload_adapter=_adapt_campaign_bids,
+        ),
+        "campaign_budget": Operation(
+            client="promotion",
+            method="adv_v1_budget_get",
+            payload_adapter=_adapt_campaign_id,
+        ),
+        "search_clusters": Operation(
+            client="promotion",
+            method="adv_v0_normquery_list_post",
+            payload_adapter=_adapt_search_clusters,
+        ),
+        "sales_funnel": Operation(
+            client="analytics",
+            method="post_v3_sales_funnel_products",
+            payload_adapter=_adapt_sales_funnel,
+        ),
+        "search_queries": Operation(
+            client="analytics",
+            method="api_v2_search_report_report_post",
+            payload_adapter=_adapt_search_queries,
+        ),
+        "stock_analytics": Operation(
+            client="analytics",
+            method="api_v2_stocks_report_offices_post",
+            payload_adapter=_adapt_stock_analytics,
+        ),
+        "report_status": Operation(
+            client="analytics",
+            method="api_v2_nm_report_downloads_get",
+            payload_adapter=_adapt_report_status,
+        ),
+        "balance": Operation(
+            client="finances",
+            method="get_v1_account_balance",
+            payload_adapter=_require_empty_payload,
+        ),
+        "financial_documents": Operation(
+            client="finances",
+            method="get_v1_documents_list",
+            payload_adapter=_adapt_financial_documents,
+        ),
+        "feedbacks": Operation(
+            client="communications",
+            method="api_v1_feedbacks_get",
+            payload_adapter=_adapt_feedbacks,
+        ),
+        "questions": Operation(
+            client="communications",
+            method="api_v1_questions_get",
+            payload_adapter=_adapt_questions,
+        ),
+        "chats": Operation(
+            client="communications",
+            method="api_v1_seller_chats_get",
+            payload_adapter=_require_empty_payload,
+        ),
+        "chat_events": Operation(
+            client="communications",
+            method="api_v1_seller_events_get",
+            payload_adapter=_adapt_chat_events,
+        ),
+        "create_campaign": Operation(
+            client="promotion",
+            method="adv_v2_seacat_save_ad_post",
+            mutation=True,
+            payload_adapter=_adapt_create_campaign,
+        ),
+        "start_campaign": Operation(
+            client="promotion",
+            method="adv_v0_start_get",
+            mutation=True,
+            payload_adapter=_adapt_campaign_id,
+        ),
+        "pause_campaign": Operation(
+            client="promotion",
+            method="adv_v0_pause_get",
+            mutation=True,
+            payload_adapter=_adapt_campaign_id,
+        ),
+        "stop_campaign": Operation(
+            client="promotion",
+            method="adv_v0_stop_get",
+            mutation=True,
+            payload_adapter=_adapt_campaign_id,
+        ),
+        "rename_campaign": Operation(
+            client="promotion",
+            method="adv_v0_rename_post",
+            mutation=True,
+            payload_adapter=_adapt_rename_campaign,
+        ),
+        "update_bids": Operation(
+            client="promotion",
+            method="api_advert_v1_bids_patch",
+            mutation=True,
+            payload_adapter=_adapt_update_bids,
+        ),
+        "set_minus_phrases": Operation(
+            client="promotion",
+            method="adv_v0_normquery_set_minus_post",
+            mutation=True,
+            payload_adapter=_adapt_set_minus_phrases,
+        ),
+        "start_report": Operation(
+            client="analytics",
+            method="api_v2_nm_report_downloads_post",
+            mutation=True,
+            payload_adapter=_adapt_start_report,
+        ),
+        "reply_feedback": Operation(
+            client="communications",
+            method="api_v1_feedbacks_answer_post",
+            mutation=True,
+            payload_adapter=_adapt_reply_feedback,
+        ),
+        "reply_question": Operation(
+            client="communications",
+            method="api_v1_questions_patch",
+            mutation=True,
+            payload_adapter=_adapt_reply_question,
+        ),
+        "send_chat_message": Operation(
+            client="communications",
+            method="api_v1_seller_message_post",
+            mutation=True,
+            payload_adapter=_adapt_send_chat_message,
+        ),
+        "deposit_campaign_budget": Operation(
+            client="promotion",
+            method="adv_v1_budget_deposit_post",
+            mutation=True,
+            payload_adapter=_adapt_deposit_campaign_budget,
+        ),
     }
 )
 
@@ -530,6 +1088,27 @@ def _create_sdk_clients(token: str) -> dict[str, object]:
         "orders_fbs": orders_fbs.DefaultApi(
             orders_fbs.ApiClient(
                 orders_fbs.Configuration(api_key={"HeaderApiKey": token})
+            )
+        ),
+        "rates": rates.DefaultApi(
+            rates.ApiClient(rates.Configuration(api_key={"HeaderApiKey": token}))
+        ),
+        "promotion": promotion.DefaultApi(
+            promotion.ApiClient(
+                promotion.Configuration(api_key={"HeaderApiKey": token})
+            )
+        ),
+        "analytics": analytics.DefaultApi(
+            analytics.ApiClient(
+                analytics.Configuration(api_key={"HeaderApiKey": token})
+            )
+        ),
+        "finances": finances.DefaultApi(
+            finances.ApiClient(finances.Configuration(api_key={"HeaderApiKey": token}))
+        ),
+        "communications": communications.DefaultApi(
+            communications.ApiClient(
+                communications.Configuration(api_key={"HeaderApiKey": token})
             )
         ),
     }
