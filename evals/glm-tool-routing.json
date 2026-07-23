@@ -1,0 +1,62 @@
+[
+  {
+    "id": "seller-profile",
+    "prompt": "Покажи профиль текущего продавца Wildberries.",
+    "expected_tool": "wb_get_seller_profile",
+    "plan_then_apply": false
+  },
+  {
+    "id": "catalog-cards",
+    "prompt": "Выведи первые 20 карточек товаров из моего каталога.",
+    "expected_tool": "wb_list_cards",
+    "plan_then_apply": false
+  },
+  {
+    "id": "inventory-stocks",
+    "prompt": "Проверь остатки товара 123456 на всех складах.",
+    "expected_tool": "wb_get_stocks",
+    "plan_then_apply": false
+  },
+  {
+    "id": "campaign-statistics",
+    "prompt": "Дай статистику рекламной кампании 123 за 1–7 июля.",
+    "expected_tool": "wb_get_campaign_stats",
+    "plan_then_apply": false
+  },
+  {
+    "id": "campaign-bids",
+    "prompt": "Подготовь изменение ставок кампании 123 для товара 456 в поиске.",
+    "expected_tool": "wb_plan_update_bids",
+    "plan_then_apply": true
+  },
+  {
+    "id": "finance-balance",
+    "prompt": "Какой сейчас баланс моего кабинета Wildberries?",
+    "expected_tool": "wb_get_balance",
+    "plan_then_apply": false
+  },
+  {
+    "id": "feedback-reply",
+    "prompt": "Подготовь ответ «Спасибо за отзыв» на отзыв feedback-123.",
+    "expected_tool": "wb_plan_reply_feedback",
+    "plan_then_apply": true
+  },
+  {
+    "id": "cancel-order",
+    "prompt": "Подготовь отмену заказа 12345678.",
+    "expected_tool": "wb_plan_cancel_order",
+    "plan_then_apply": true
+  },
+  {
+    "id": "analytics-report",
+    "prompt": "Сформируй отчёт по товарам 456 и 789 за прошлый месяц.",
+    "expected_tool": "wb_plan_start_report",
+    "plan_then_apply": true
+  },
+  {
+    "id": "campaign-deposit",
+    "prompt": "Подготовь пополнение рекламной кампании 123 на 3000 рублей.",
+    "expected_tool": "wb_plan_deposit_campaign_budget",
+    "plan_then_apply": true
+  }
+]

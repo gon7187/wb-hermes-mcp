@@ -1,0 +1,4 @@
+mcp_servers:
+  wb:
+    command: /opt/wb-hermes-mcp/run-wb-mcp
+    enabled: true
