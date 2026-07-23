@@ -74,11 +74,20 @@ def _adapt_price_upload(payload: Mapping[str, object]) -> Mapping[str, object]:
     return {"api_v2_upload_task_post_request": request}
 
 
+def _require_empty_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Reject user input for SDK operations that take no public arguments."""
+
+    if payload:
+        raise ValueError("operation takes no payload")
+    return {}
+
+
 OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
     {
         "seller_profile": Operation(
             client="general",
             method="get_v1_seller_info",
+            payload_adapter=_require_empty_payload,
         ),
         "set_prices": Operation(
             client="items",

@@ -20,8 +20,11 @@ class SellerResponse:
 def test_gateway_dispatches_a_read_to_registered_sdk_method_and_serializes_response() -> (
     None
 ):
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
     class General:
-        def get_v1_seller_info(self) -> SellerResponse:
+        def get_v1_seller_info(self, *args: object, **kwargs: object) -> SellerResponse:
+            calls.append((args, kwargs))
             return SellerResponse(
                 profile=SellerProfile(seller_id=42, name="seller"),
                 labels=[{"kind": "verified"}],
@@ -33,6 +36,33 @@ def test_gateway_dispatches_a_read_to_registered_sdk_method_and_serializes_respo
         "profile": {"seller_id": 42, "name": "seller"},
         "labels": [{"kind": "verified"}],
     }
+    assert calls == [((), {})]
+
+
+def test_gateway_rejects_seller_profile_transport_kwargs_before_sdk_call() -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class General:
+        def get_v1_seller_info(
+            self, *args: object, **kwargs: object
+        ) -> dict[str, object]:
+            calls.append((args, kwargs))
+            return {"name": "seller"}
+
+    gateway = WildberriesGateway("test-token", clients={"general": General()})
+
+    transport_payloads: tuple[dict[str, object], ...] = (
+        {"_headers": {"Authorization": "secret-token"}},
+        {"_request_auth": {"HeaderApiKey": "secret-token"}},
+    )
+    for payload in transport_payloads:
+        with pytest.raises(WBError) as caught:
+            gateway.read("seller_profile", payload)
+
+        assert caught.value.kind == "invalid_payload"
+        assert "secret-token" not in caught.value.message
+
+    assert calls == []
 
 
 def test_gateway_adapts_price_items_to_the_registered_sdk_request_model() -> None:
