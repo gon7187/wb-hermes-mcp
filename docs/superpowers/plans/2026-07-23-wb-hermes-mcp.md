@@ -6,7 +6,7 @@
 
 **Architecture:** A small Python package registers explicit business tools against FastMCP. Each tool delegates to a table-driven `WildberriesGateway`; the gateway creates generated SDK clients, validates request data, serializes SDK models, and normalizes failures. Mutations create a one-time in-memory confirmation plan and only `wb_apply_change` can execute it.
 
-**Tech Stack:** Python 3.12+, `mcp` FastMCP, `wildberries-sdk`, Pydantic, pytest, uv.
+**Tech Stack:** Python 3.12+, `mcp[cli]>=1.27,<2` FastMCP, `wildberries-sdk`, Pydantic, pytest, uv.
 
 ## Global Constraints
 
@@ -78,7 +78,7 @@ from wb_mcp.server import create_server
 
 
 def test_server_has_wb_name() -> None:
-    assert create_server(token="test-token").name == "wb"
+    assert create_server(token="test-token").name == "wb_mcp"
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -93,7 +93,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'wb_mcp'`.
 [project]
 name = "wb-hermes-mcp"
 requires-python = ">=3.12"
-dependencies = ["mcp>=1", "wildberries-sdk==0.1.130"]
+dependencies = ["mcp[cli]>=1.27,<2", "wildberries-sdk==0.1.130"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -218,18 +218,21 @@ git commit -m "feat: add SDK gateway and confirmed writes"
 - [ ] **Step 1: Write failing representative-domain tests**
 
 ```python
-def test_server_exposes_catalog_order_and_supply_tools() -> None:
-    server = create_server(token="test-token")
-    names = {tool.name for tool in server._tool_manager.list_tools()}
+@pytest.mark.anyio
+async def test_server_exposes_catalog_order_and_supply_tools(client_session) -> None:
+    result = await client_session.list_tools()
+    names = {tool.name for tool in result.tools}
     assert {"wb_list_cards", "wb_get_stocks", "wb_list_orders", "wb_list_supplies"} <= names
 
 
-def test_plan_does_not_call_the_sdk_until_applied() -> None:
+@pytest.mark.anyio
+async def test_plan_does_not_call_the_sdk_until_applied() -> None:
     calls: list[str] = []
     server = create_server(token="test-token", gateway=RecordingGateway(calls))
-    plan = server.call_tool("wb_plan_set_prices", {"payload": {"items": []}})
-    assert calls == []
-    server.call_tool("wb_apply_change", {"confirmation_id": plan["confirmation_id"]})
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as client:
+        plan = await client.call_tool("wb_plan_set_prices", {"payload": {"items": []}})
+        assert calls == []
+        await client.call_tool("wb_apply_change", {"confirmation_id": plan.structuredContent["confirmation_id"]})
     assert calls == ["set_prices"]
 ```
 
@@ -274,8 +277,9 @@ git commit -m "feat: add catalog inventory orders and supplies tools"
 - [ ] **Step 1: Write failing coverage and operation-description tests**
 
 ```python
-def test_server_exposes_every_business_domain() -> None:
-    names = {tool.name for tool in create_server(token="test-token")._tool_manager.list_tools()}
+@pytest.mark.anyio
+async def test_server_exposes_every_business_domain(client_session) -> None:
+    names = {tool.name for tool in (await client_session.list_tools()).tools}
     assert {"wb_list_campaigns", "wb_get_sales_funnel", "wb_get_balance", "wb_list_feedbacks"} <= names
 
 
@@ -325,8 +329,9 @@ git commit -m "feat: add promotion analytics finance and communication tools"
 - [ ] **Step 1: Write a failing stdio/tool-inventory test**
 
 ```python
-def test_tool_count_and_write_guards_are_visible() -> None:
-    tools = create_server(token="test-token")._tool_manager.list_tools()
+@pytest.mark.anyio
+async def test_tool_count_and_write_guards_are_visible(client_session) -> None:
+    tools = (await client_session.list_tools()).tools
     assert len(tools) >= 45
     assert "wb_apply_change" in {tool.name for tool in tools}
 ```

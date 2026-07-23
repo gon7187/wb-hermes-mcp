@@ -41,7 +41,8 @@ environment (`WB_API_TOKEN`).
 
 ## Runtime
 
-`python -m wb_mcp` is a stdio MCP process. Hermes receives a sibling entry:
+`python -m wb_mcp` is a stdio MCP process whose protocol server name is
+`wb_mcp`. Hermes receives a sibling entry:
 
 ```yaml
 mcp_servers:
