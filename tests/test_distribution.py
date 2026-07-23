@@ -94,3 +94,11 @@ def test_glm_routing_eval_covers_core_workflows_with_advertised_tools() -> None:
         "wb_plan_start_report",
         "wb_plan_deposit_campaign_budget",
     } <= expected_tools
+
+
+def test_tool_reference_lists_every_public_mcp_tool() -> None:
+    from wb_mcp import server
+
+    reference = (PROJECT_ROOT / "docs" / "tools.md").read_text(encoding="utf-8")
+
+    assert not [tool for tool in server._PUBLIC_OPERATION_HELP if tool not in reference]
