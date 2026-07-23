@@ -60,3 +60,10 @@
   operation validation.
 - Verification: focused regression tests passed, full `uv run pytest -v`
   passed (`24 passed`), and Ruff formatting/lint plus Pyright completed cleanly.
+
+## Surface correction
+
+- The remediation removes the fabricated order-status write and the misleading
+  single-order alias. The final Task 3 surface is 14 read tools, 8 plan tools,
+  and the shared `wb_apply_change` control tool; `wb_list_new_orders` and
+  `wb_get_order_statuses` are both read-only.
