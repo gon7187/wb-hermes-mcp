@@ -429,25 +429,27 @@ class CardUpdate(PayloadModel):
         examples=[True],
     )
     brand: StrictStr | None = Field(
-        default=None, description="Бренд.", examples=["YIT"]
+        default=None,
+        description="Текущий бренд из полного снимка карточки.",
+        examples=["YIT"],
     )
     title: StrictStr | None = Field(
         default=None,
         max_length=60,
-        description="Новое название товара, максимум 60 символов.",
+        description="Итоговое название из полного снимка, максимум 60 символов.",
         examples=["Носки хлопковые"],
     )
     description: StrictStr | None = Field(
         default=None,
-        description="Новое описание товара.",
+        description="Текущее или итоговое описание из полного снимка карточки.",
         examples=["Хлопковые носки для повседневной носки."],
     )
     dimensions: CardDimensions | None = Field(
-        default=None, description="Габариты с упаковкой."
+        default=None, description="Текущие габариты с упаковкой из полного снимка."
     )
     characteristics: list[CardCharacteristic] | None = Field(
         default=None,
-        description="Характеристики по схеме предмета.",
+        description="Полный текущий набор характеристик по схеме предмета.",
     )
 
 
@@ -455,7 +457,11 @@ class UpdateCardsPayload(PayloadModel):
     cards: list[CardUpdate] = Field(
         min_length=1,
         max_length=3000,
-        description="Карточки для обновления; API требует nmID, vendorCode и sizes.",
+        description=(
+            "Карточки для обновления. Передайте полный текущий снимок: nmID, "
+            "vendorCode, sizes, brand, title, description, dimensions и "
+            "characteristics; WB очищает пропущенные поля."
+        ),
     )
 
 
@@ -1762,9 +1768,29 @@ _PUBLIC_OPERATION_HELP.update(
             {"payload": {"supply_id": "WB-GI-123456", "type": "png"}},
         ),
         "wb_plan_update_cards": _public_help(
-            "Создаёт план обновления карточек.",
+            "Создаёт план обновления карточек только из полного текущего снимка.",
             ["cards"],
-            {"payload": {"cards": [{"nmID": 987654321}]}},
+            {
+                "payload": {
+                    "cards": [
+                        {
+                            "nmID": 987654321,
+                            "vendorCode": "SKU-42",
+                            "sizes": [{"chrtID": 1, "skus": ["123"]}],
+                            "brand": "YIT",
+                            "title": "Товар",
+                            "description": "Описание товара",
+                            "dimensions": {
+                                "length": 10,
+                                "width": 10,
+                                "height": 10,
+                                "weightBrutto": 1,
+                            },
+                            "characteristics": [{"id": 1, "value": "значение"}],
+                        }
+                    ]
+                }
+            },
             mutation=True,
         ),
         "wb_plan_save_media": _public_help(
@@ -2146,7 +2172,8 @@ def create_server(
         name="wb_plan_update_cards",
         description=(
             "Проверяет и создаёт подтверждаемый план обновления карточек WB. Передайте "
-            "cards с nmID, vendorCode и sizes; WB не вызывается до wb_apply_change."
+            "полный текущий снимок cards, иначе WB очистит пропущенные поля; WB не "
+            "вызывается до wb_apply_change."
         ),
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,

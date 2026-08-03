@@ -32,6 +32,12 @@ JsonValue: TypeAlias = (
 )
 PayloadAdapter: TypeAlias = Callable[[Mapping[str, object]], Mapping[str, object]]
 MAX_RAW_RESPONSE_BYTES: Final = 128 * 1024 * 1024
+_CARD_UPDATE_SNAPSHOT_FIELDS: Final = frozenset(
+    {"brand", "title", "description", "dimensions", "characteristics"}
+)
+_CARD_UPDATE_DIMENSION_FIELDS: Final = frozenset(
+    {"length", "width", "height", "weightBrutto"}
+)
 
 
 @dataclass(frozen=True)
@@ -289,8 +295,18 @@ def _adapt_update_cards(payload: Mapping[str, object]) -> Mapping[str, object]:
     for card in cards:
         if not isinstance(card, Mapping):
             raise ValueError("card update item is invalid")
-        # The SDK defaults a missing kizMarked to false. Explicit None preserves a
-        # partial update by omitting the field from the generated request body.
+        # ponytail: reject partial updates; callers must preflight the live card
+        # instead of relying on WB to merge omitted Content API fields.
+        if _CARD_UPDATE_SNAPSHOT_FIELDS.difference(card):
+            raise ValueError("card update requires a complete content snapshot")
+        dimensions = card["dimensions"]
+        if not isinstance(
+            dimensions, Mapping
+        ) or _CARD_UPDATE_DIMENSION_FIELDS.difference(dimensions):
+            raise ValueError("card update dimensions must be complete")
+        characteristics = card["characteristics"]
+        if not isinstance(characteristics, list) or not characteristics:
+            raise ValueError("card update characteristics must not be empty")
         card_payload = dict(card)
         card_payload.setdefault("kizMarked", None)
         requests.append(
