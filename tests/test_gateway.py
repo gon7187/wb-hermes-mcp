@@ -138,6 +138,27 @@ def test_gateway_validates_a_planned_write_without_needing_an_sdk_client() -> No
     assert "SECRET_MARKER" not in caught.value.message
 
 
+def test_gateway_rejects_partial_card_updates_that_would_clear_content() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    with pytest.raises(WBError) as caught:
+        gateway.validate_write(
+            "update_cards",
+            {
+                "cards": [
+                    {
+                        "nmID": 100,
+                        "vendorCode": "SKU-100",
+                        "sizes": [{"chrtID": 200, "skus": ["barcode"]}],
+                        "title": "Новое название",
+                    }
+                ]
+            },
+        )
+
+    assert caught.value.kind == "invalid_payload"
+
+
 def test_gateway_adapts_empty_minus_phrases_as_an_explicit_clear() -> None:
     gateway = WildberriesGateway("test-token", clients={})
 
