@@ -2850,12 +2850,19 @@ def create_server(
         "wb_plan_update_supply", UpdateSupplyPayload, required=True
     )
     mcp.register_payload_input("wb_list_campaigns", CampaignListPayload, required=False)
+    mcp.register_payload_input("wb_get_campaign_counts", EmptyPayload, required=False)
     mcp.register_payload_input("wb_get_campaign", CampaignIdPayload, required=True)
     mcp.register_payload_input(
         "wb_get_campaign_stats", CampaignStatsPayload, required=True
     )
     mcp.register_payload_input(
+        "wb_get_campaign_spend_history", DateRangePayload, required=True
+    )
+    mcp.register_payload_input(
         "wb_get_campaign_bids", CampaignBidsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_minimum_campaign_bids", MinimumCampaignBidsPayload, required=True
     )
     mcp.register_payload_input(
         "wb_get_campaign_budget", CampaignIdPayload, required=True
@@ -2863,12 +2870,19 @@ def create_server(
     mcp.register_payload_input(
         "wb_get_search_clusters", SearchClustersPayload, required=True
     )
+    mcp.register_payload_input("wb_list_sales", SalesPayload, required=True)
     mcp.register_payload_input("wb_get_sales_funnel", NmDateRangePayload, required=True)
     mcp.register_payload_input(
         "wb_get_search_queries", SearchQueriesPayload, required=True
     )
     mcp.register_payload_input(
         "wb_get_stock_analytics", StockAnalyticsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_stock_products", StockProductsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_wb_warehouse_stocks", WbWarehouseStocksPayload, required=False
     )
     mcp.register_payload_input(
         "wb_get_report_status", ReportStatusPayload, required=False

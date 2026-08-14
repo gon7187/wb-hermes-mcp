@@ -109,6 +109,21 @@ async def test_server_exposes_catalog_inventory_order_and_supply_tools() -> None
 
 
 @pytest.mark.anyio
+async def test_every_tool_has_an_explicit_input_spec() -> None:
+    wb_server = server.create_server(token="test-token", gateway=RecordingGateway())
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        tools = (await client.list_tools()).tools
+
+    assert isinstance(wb_server, server.SafeFastMCP)
+    assert {tool.name for tool in tools} == set(wb_server._input_specs)
+    for tool in tools:
+        assert tool.inputSchema.get("additionalProperties") is False, tool.name
+
+
+@pytest.mark.anyio
 async def test_plan_does_not_call_the_sdk_until_applied_once() -> None:
     gateway = RecordingGateway()
     wb_server = server.create_server(token="test-token", gateway=gateway)
