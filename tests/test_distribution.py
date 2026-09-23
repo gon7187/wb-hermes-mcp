@@ -25,7 +25,7 @@ async def test_stdio_entrypoint_performs_mcp_handshake_and_advertises_tools() ->
         command=sys.executable,
         args=["-m", "wb_mcp"],
         cwd=PROJECT_ROOT,
-        env={"WB_API_TOKEN": "test-token"},
+        env={"WB_API_TOKEN": "test-token", "PYTHONPATH": str(PROJECT_ROOT / "src")},
     )
     with NamedTemporaryFile(mode="w+", encoding="utf-8") as stderr:
         async with stdio_client(parameters, errlog=cast(TextIO, stderr)) as (
@@ -41,7 +41,8 @@ async def test_stdio_entrypoint_performs_mcp_handshake_and_advertises_tools() ->
         stderr_output = stderr.read()
 
     names = {tool.name for tool in tools.tools}
-    assert len(names) == 56
+    assert len(names) == 57
+    assert "wb_get_search_cluster_stats" in names
     assert {
         "wb_get_seller_profile",
         "wb_list_cards",

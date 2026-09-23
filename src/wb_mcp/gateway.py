@@ -524,6 +524,23 @@ def _adapt_campaign_id(payload: Mapping[str, object]) -> Mapping[str, object]:
     return {"id": _require_int(payload, "campaign_id")}
 
 
+def _adapt_search_cluster_stats(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"date_from", "date_to", "items"})
+    items = _require_list(payload, "items")
+    request = promotion.V1GetNormQueryStatsRequest.model_validate(
+        {
+            "from": _require_date(payload, "date_from"),
+            "to": _require_date(payload, "date_to"),
+            "items": [
+                {"advertId": _require_int(item, "campaign_id"),
+                 "nmId": _require_int(item, "nm_id")}
+                for item in items
+            ],
+        }
+    )
+    return {"v1_get_norm_query_stats_request": request}
+
+
 def _adapt_search_clusters(payload: Mapping[str, object]) -> Mapping[str, object]:
     _allow_only(payload, {"campaign_id", "nm_id"})
     request = promotion.V0GetNormQueryListRequest.model_validate(
@@ -1109,6 +1126,11 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             client="promotion",
             method="adv_v1_budget_get",
             payload_adapter=_adapt_campaign_id,
+        ),
+        "search_cluster_stats": Operation(
+            client="promotion",
+            method="adv_v1_normquery_stats_post",
+            payload_adapter=_adapt_search_cluster_stats,
         ),
         "search_clusters": Operation(
             client="promotion",

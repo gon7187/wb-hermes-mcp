@@ -8,6 +8,10 @@
 инструмента. Почти все бизнес-инструменты получают объект `payload`; у
 `wb_apply_change` и `wb_describe_operation` параметры находятся в корне.
 
+## Статистика поисковых кластеров
+
+`wb_get_search_cluster_stats` — read-only `POST /adv/v1/normquery/stats` через promotion SDK. Вход: `payload.date_from`, `payload.date_to`, `payload.items` (1–100 уникальных пар `campaign_id`, `nm_id`). Даты включительно. Возвращает `items[].advertId`, `nmId`, `dailyStats[].date`, `dailyStats[].stat`: `normQuery`, `views`, `clicks`, `atbs`, `orders`, `spend`, `ctr`, `cpc`, `cpm`, `avgPos`, `shks`. Метрики не заменяют статистику всей РК; отсутствие строки не доказывает ноль. Это дневные кластеры, не журнал каждого исходного пользовательского запроса. Официальный раздел: https://dev.wildberries.ru/openapi/promotion ; контракт проверен по установленному SDK 0.1.130 и live-ответу. При проверке сайт документации блокировал доступ WAF. Токены и транспорт не менялись.
+
 ## Чтение
 
 ### Продавец и каталог

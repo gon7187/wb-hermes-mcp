@@ -23,6 +23,8 @@ FORBIDDEN = (
 def test_versioned_skill_tree_has_every_migrated_file_and_no_legacy_calls() -> None:
     expected = {
         "analytics/wb-seller-analytics/SKILL.md",
+        "analytics/wb-search-query-audit/SKILL.md",
+        "analytics/wb-seller-analytics/references/budget-collector-validation.md",
         "analytics/wb-seller-analytics/references/wb-advert-write-api.md",
         "e-commerce/marketplace-seller-analytics/SKILL.md",
         "e-commerce/marketplace-seller-analytics/references/wb-api.md",

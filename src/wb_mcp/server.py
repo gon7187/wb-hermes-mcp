@@ -747,6 +747,20 @@ class DateRangePayload(PayloadModel):
         return self
 
 
+class SearchClusterStatsPayload(DateRangePayload):
+    items: list[CampaignBidsPayload] = Field(
+        min_length=1, max_length=100,
+        description="Пары campaign_id/nm_id, до 100 товаров кампаний.",
+    )
+
+    @model_validator(mode="after")
+    def unique_pairs(self) -> SearchClusterStatsPayload:
+        pairs = [(item.campaign_id, item.nm_id) for item in self.items]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("Duplicate campaign/product pair")
+        return self
+
+
 class NmDateRangePayload(DateRangePayload):
     nm_ids: list[StrictInt] = Field(
         min_length=1,
@@ -1462,6 +1476,13 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
                 "date_to": "2026-07-02",
             }
         },
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_search_cluster_stats": {
+        "description": "Дневная статистика поисковых кластеров, CPM/CPC, только чтение.",
+        "required_payload_keys": ["date_from", "date_to", "items"],
+        "example": {"payload": {"date_from": "2026-09-21", "date_to": "2026-09-22", "items": [{"campaign_id": 123456, "nm_id": 987654321}]}},
         "mutation": False,
         "plan_then_apply": False,
     },
@@ -2420,6 +2441,22 @@ def create_server(
         return read_tool("campaign_budget", _as_payload(parsed))
 
     @mcp.tool(
+        name="wb_get_search_cluster_stats",
+        description=(
+            "Возвращает дневную статистику поисковых кластеров WB за период "
+            "для до 100 пар campaign_id/nm_id. Только чтение, CPM/CPC. "
+            "Используйте для оценки показов, расхода и конверсий конкретных фраз."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_search_cluster_stats(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, SearchClusterStatsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("search_cluster_stats", _as_payload(parsed))
+
+    @mcp.tool(
         name="wb_get_search_clusters",
         description=(
             "Возвращает нормализованные поисковые кластеры одного товара в кампании WB. "
@@ -2866,6 +2903,9 @@ def create_server(
     )
     mcp.register_payload_input(
         "wb_get_campaign_budget", CampaignIdPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_search_cluster_stats", SearchClusterStatsPayload, required=True
     )
     mcp.register_payload_input(
         "wb_get_search_clusters", SearchClustersPayload, required=True
