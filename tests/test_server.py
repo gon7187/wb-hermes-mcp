@@ -747,3 +747,103 @@ async def test_every_exposed_tool_has_public_glm_help() -> None:
         names = {tool.name for tool in (await client.list_tools()).tools}
 
     assert names == set(server._PUBLIC_OPERATION_HELP)
+
+
+def test_campaign_stats_daily_view_drops_only_the_platform_breakdown() -> None:
+    """days[].apps is over 90% of the payload and is never read by callers."""
+
+    raw = {
+        "data": [
+            {
+                "advertId": 1,
+                "sum": 10.0,
+                "orders": 2,
+                "boosterStats": [{"date": "2026-09-21", "position": 3}],
+                "days": [
+                    {
+                        "date": "2026-09-21",
+                        "sum": 10.0,
+                        "orders": 2,
+                        "apps": [{"appType": 32, "views": 5}],
+                    }
+                ],
+            }
+        ]
+    }
+
+    trimmed = server._campaign_stats_view(raw, "daily")
+
+    day = trimmed["data"][0]["days"][0]
+    assert day == {"date": "2026-09-21", "sum": 10.0, "orders": 2}
+    assert "boosterStats" not in trimmed["data"][0]
+    assert trimmed["data"][0]["sum"] == 10.0
+
+
+def test_campaign_stats_summary_view_keeps_campaign_totals_without_days() -> None:
+    raw = {"data": [{"advertId": 1, "sum": 10.0, "days": [{"date": "2026-09-21"}]}]}
+
+    trimmed = server._campaign_stats_view(raw, "summary")
+
+    assert trimmed["data"] == [{"advertId": 1, "sum": 10.0}]
+
+
+def test_campaign_stats_full_view_is_returned_untouched() -> None:
+    raw = {"data": [{"advertId": 1, "days": [{"date": "x", "apps": [{"appType": 1}]}]}]}
+
+    assert server._campaign_stats_view(raw, "full") is raw
+
+
+def test_campaign_counts_summary_keeps_the_campaign_ids() -> None:
+    """The IDs are the reason to call this tool, only changeTime is dropped."""
+
+    raw = {
+        "all": 2,
+        "adverts": [
+            {
+                "type": 9,
+                "status": 9,
+                "count": 2,
+                "advert_list": [
+                    {"advertId": 11, "changeTime": "2026-09-21T10:00:00+03:00"},
+                    {"advertId": 22, "changeTime": "2026-09-22T10:00:00+03:00"},
+                ],
+            }
+        ],
+    }
+
+    trimmed = server._campaign_counts_view(raw, "summary")
+
+    assert trimmed["adverts"][0]["campaign_ids"] == [11, 22]
+    assert trimmed["all"] == 2
+
+
+def test_stock_products_summary_keeps_trade_metrics_and_drops_photos() -> None:
+    raw = {
+        "data": {
+            "currency": "RUB",
+            "items": [
+                {
+                    "nmID": 7,
+                    "name": "Шкаф",
+                    "vendorCode": "П001",
+                    "subjectName": "Шкафы",
+                    "mainPhoto": "https://example.invalid/1.webp",
+                    "metrics": {
+                        "ordersCount": 3,
+                        "ordersSum": 300,
+                        "stockCount": 10,
+                        "avgOrdersByMonth": [{"value": 1}],
+                        "currentPrice": {"minPrice": 100, "maxPrice": 100},
+                    },
+                }
+            ],
+        }
+    }
+
+    trimmed = server._stock_products_view(raw, "summary")
+
+    item = trimmed["data"]["items"][0]
+    assert "mainPhoto" not in item
+    assert "avgOrdersByMonth" not in item["metrics"]
+    assert item["metrics"]["ordersSum"] == 300
+    assert item["metrics"]["minPrice"] == 100

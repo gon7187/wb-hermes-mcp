@@ -688,6 +688,16 @@ class CampaignIdPayload(PayloadModel):
     campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
 
 
+class CampaignCountsPayload(PayloadModel):
+    view: Literal["summary", "full"] = Field(
+        default="summary",
+        description=(
+            "Объём ответа: summary — статусы с плоским списком campaign_ids "
+            "(по умолчанию), full — полный ответ WB с временем изменения."
+        ),
+    )
+
+
 class CampaignStatsPayload(PayloadModel):
     campaign_ids: list[StrictInt] = Field(
         min_length=1,
@@ -700,6 +710,13 @@ class CampaignStatsPayload(PayloadModel):
     )
     date_to: date = Field(
         description="Конец периода статистики.", examples=["2026-07-02"]
+    )
+    view: Literal["summary", "daily", "full"] = Field(
+        default="daily",
+        description=(
+            "Объём ответа: summary — только итоги кампаний, daily — дни без "
+            "разбивки по платформам (по умолчанию), full — полный ответ WB."
+        ),
     )
 
     @model_validator(mode="after")
@@ -795,6 +812,13 @@ class SalesPayload(PayloadModel):
 
 
 class StockProductsPayload(DateRangePayload):
+    view: Literal["summary", "full"] = Field(
+        default="summary",
+        description=(
+            "Объём ответа: summary — артикул, название и торговые метрики "
+            "(по умолчанию), full — полный ответ WB с фото и разбивками."
+        ),
+    )
     nm_ids: list[StrictInt] | None = Field(
         default=None,
         max_length=1000,
@@ -1466,7 +1490,11 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
         "plan_then_apply": False,
     },
     "wb_get_campaign_counts": {
-        "description": "Возвращает кампании, сгруппированные WB по статусу и типу.",
+        "description": (
+            "Возвращает кампании, сгруппированные WB по статусу и типу. "
+            "payload.view: summary (по умолчанию, плоский список campaign_ids) "
+            "или full (полный ответ WB с changeTime)."
+        ),
         "required_payload_keys": [],
         "example": {},
         "mutation": False,
@@ -2019,6 +2047,110 @@ def _operation_help(tool_name: str) -> dict[str, object] | None:
     return {"ok": True, "tool": tool_name, **details}
 
 
+_STOCK_SUMMARY_METRICS: tuple[str, ...] = (
+    "ordersCount",
+    "ordersSum",
+    "buyoutPercent",
+    "stockCount",
+    "stockSum",
+    "availability",
+)
+
+
+def _campaign_stats_view(result: dict[str, object], view: str) -> dict[str, object]:
+    """Trim campaign statistics before they reach the model context.
+
+    The per-platform ``days[].apps[]`` breakdown is over 90% of the payload and
+    is almost never used: callers aggregate back to a day or a campaign.
+    """
+
+    if view == "full":
+        return result
+    rows = result.get("data")
+    if not isinstance(rows, list):
+        return result
+
+    trimmed: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        compact = {
+            key: value
+            for key, value in row.items()
+            if key not in {"days", "boosterStats"}
+        }
+        if view == "daily":
+            compact["days"] = [
+                {key: value for key, value in day.items() if key != "apps"}
+                for day in row.get("days") or []
+                if isinstance(day, Mapping)
+            ]
+        trimmed.append(compact)
+    return {"data": trimmed, "view": view}
+
+
+def _stock_products_view(result: dict[str, object], view: str) -> dict[str, object]:
+    """Keep the identity and trade metrics of each product, drop the rest."""
+
+    if view == "full":
+        return result
+    data = result.get("data")
+    if not isinstance(data, Mapping):
+        return result
+    items = data.get("items")
+    if not isinstance(items, list):
+        return result
+
+    trimmed: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        metrics = item.get("metrics")
+        compact: dict[str, object] = {
+            key: item.get(key)
+            for key in ("nmID", "name", "vendorCode", "subjectName")
+            if item.get(key) is not None
+        }
+        if isinstance(metrics, Mapping):
+            compact["metrics"] = {
+                key: metrics[key] for key in _STOCK_SUMMARY_METRICS if key in metrics
+            }
+            price = metrics.get("currentPrice")
+            if isinstance(price, Mapping):
+                compact["metrics"]["minPrice"] = price.get("minPrice")
+        trimmed.append(compact)
+    return {"data": {"items": trimmed, "currency": data.get("currency")}, "view": view}
+
+
+def _campaign_counts_view(result: dict[str, object], view: str) -> dict[str, object]:
+    """Replace the {advertId, changeTime} pairs with a plain list of IDs."""
+
+    if view == "full":
+        return result
+    adverts = result.get("adverts")
+    if not isinstance(adverts, list):
+        return result
+
+    trimmed: list[dict[str, object]] = []
+    for group in adverts:
+        if not isinstance(group, Mapping):
+            continue
+        ids = [
+            entry.get("advertId")
+            for entry in group.get("advert_list") or []
+            if isinstance(entry, Mapping) and entry.get("advertId") is not None
+        ]
+        trimmed.append(
+            {
+                "type": group.get("type"),
+                "status": group.get("status"),
+                "count": group.get("count", len(ids)),
+                "campaign_ids": ids,
+            }
+        )
+    return {"adverts": trimmed, "all": result.get("all"), "view": view}
+
+
 _PLACEMENT_FIELDS: dict[str, tuple[str, ...]] = {
     "search": ("search",),
     "recommendations": ("recommendations",),
@@ -2547,15 +2679,24 @@ def create_server(
 
     @mcp.tool(
         name="wb_get_campaign_counts",
-        description="Возвращает кампании WB, сгруппированные по статусу и типу.",
+        description=(
+            "Возвращает кампании WB, сгруппированные по статусу и типу. "
+            "payload.view: summary (по умолчанию) отдаёт плоский список "
+            "campaign_ids без changeTime, full — полный ответ WB."
+        ),
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
     def wb_get_campaign_counts(payload: object = None) -> dict[str, object]:
-        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        parsed = _parse_payload(payload, CampaignCountsPayload, optional=True)
         if parsed is None:
             return _validation_error()
-        return read_tool("campaign_counts", _as_payload(parsed))
+        arguments = _as_payload(parsed) if parsed is not None else {}
+        view = str(arguments.pop("view", "summary"))
+        result = read_tool("campaign_counts", {})
+        if result.get("ok") is False:
+            return result
+        return _campaign_counts_view(result, view)
 
     @mcp.tool(
         name="wb_get_campaign",
@@ -2571,7 +2712,13 @@ def create_server(
 
     @mcp.tool(
         name="wb_get_campaign_stats",
-        description="Возвращает дневную статистику до 50 кампаний WB за указанный период.",
+        description=(
+            "Возвращает дневную статистику до 50 кампаний WB за указанный период. "
+            "Параметр payload.view управляет объёмом ответа: daily (по умолчанию) "
+            "отдаёт дни без разбивки по платформам, summary — только итоги "
+            "кампаний, full — полный ответ WB. Разбивка days[].apps[] занимает "
+            "более 90% объёма и почти никогда не нужна."
+        ),
         annotations=READ_ANNOTATIONS,
         structured_output=True,
     )
@@ -2579,7 +2726,12 @@ def create_server(
         parsed = _parse_payload(payload, CampaignStatsPayload, optional=False)
         if parsed is None:
             return _validation_error()
-        return read_tool("campaign_stats", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        view = str(arguments.pop("view", "daily"))
+        result = read_tool("campaign_stats", arguments)
+        if result.get("ok") is False:
+            return result
+        return _campaign_stats_view(result, view)
 
     @mcp.tool(
         name="wb_get_campaign_spend_history",
@@ -2785,7 +2937,9 @@ def create_server(
         name="wb_get_stock_products",
         description=(
             "Возвращает постраничный товарный отчёт WB об остатках, заказах "
-            "и оборачиваемости за период."
+            "и оборачиваемости за период. payload.view: summary (по умолчанию) "
+            "оставляет артикул, название и торговые метрики, full — полный "
+            "ответ WB со ссылками на фото и помесячными разбивками."
         ),
         annotations=READ_ANNOTATIONS,
         structured_output=True,
@@ -2794,7 +2948,12 @@ def create_server(
         parsed = _parse_payload(payload, StockProductsPayload, optional=False)
         if parsed is None:
             return _validation_error()
-        return read_tool("stock_products", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        view = str(arguments.pop("view", "summary"))
+        result = read_tool("stock_products", arguments)
+        if result.get("ok") is False:
+            return result
+        return _stock_products_view(result, view)
 
     @mcp.tool(
         name="wb_get_wb_warehouse_stocks",
@@ -3186,7 +3345,9 @@ def create_server(
         "wb_plan_update_supply", UpdateSupplyPayload, required=True
     )
     mcp.register_payload_input("wb_list_campaigns", CampaignListPayload, required=False)
-    mcp.register_payload_input("wb_get_campaign_counts", EmptyPayload, required=False)
+    mcp.register_payload_input(
+        "wb_get_campaign_counts", CampaignCountsPayload, required=False
+    )
     mcp.register_payload_input("wb_get_campaign", CampaignIdPayload, required=True)
     mcp.register_payload_input(
         "wb_get_campaign_stats", CampaignStatsPayload, required=True

@@ -12,6 +12,32 @@
 
 `wb_get_search_cluster_stats` — read-only `POST /adv/v1/normquery/stats` через promotion SDK. Вход: `payload.date_from`, `payload.date_to`, `payload.items` (1–100 уникальных пар `campaign_id`, `nm_id`). Даты включительно. Возвращает `items[].advertId`, `nmId`, `dailyStats[].date`, `dailyStats[].stat`: `normQuery`, `views`, `clicks`, `atbs`, `orders`, `spend`, `ctr`, `cpc`, `cpm`, `avgPos`, `shks`. Метрики не заменяют статистику всей РК; отсутствие строки не доказывает ноль. Это дневные кластеры, не журнал каждого исходного пользовательского запроса. Официальный раздел: https://dev.wildberries.ru/openapi/promotion ; контракт проверен по установленному SDK 0.1.130 и live-ответу. При проверке сайт документации блокировал доступ WAF. Токены и транспорт не менялись.
 
+## Объём ответа: параметр `view`
+
+Три отчёта возвращают деревья, которые не помещаются в контекст модели: за
+14 дней по 50 кампаниям `wb_get_campaign_stats` отдаёт около 1.5 МБ. Свыше
+90% этого объёма — разбивка `days[].apps[]` по платформам (сайт, Android,
+iOS), которую вызывающая сторона всё равно суммирует обратно. Поэтому у
+таких инструментов есть `payload.view`.
+
+| Инструмент | Значения | По умолчанию | Что отбрасывается |
+| --- | --- | --- | --- |
+| `wb_get_campaign_stats` | `summary`, `daily`, `full` | `daily` | `daily` убирает `days[].apps[]` и `boosterStats`; `summary` убирает и сами `days` |
+| `wb_get_stock_products` | `summary`, `full` | `summary` | ссылки на фото, `wbClub`, помесячные разбивки, `saleRate`, `avgStockTurnover` |
+| `wb_get_campaign_counts` | `summary`, `full` | `summary` | `changeTime` у каждой кампании; вместо `advert_list` возвращается плоский `campaign_ids` |
+
+Замеры на реальном кабинете: `wb_get_campaign_stats` за двое суток по
+четырём кампаниям — 69 295 Б при `full`, 2 447 Б при `daily`, 849 Б при
+`summary`. `wb_get_campaign_counts` на 1031 кампанию — 77 641 Б против
+10 735 Б, при этом все ID кампаний сохраняются.
+
+`view` влияет только на форму ответа: запрос к Wildberries не меняется, а
+`full` возвращает ответ ровно таким, каким его отдаёт WB.
+
+**Изменение поведения.** Раньше эти три инструмента всегда отвечали как
+`full`. Если вам нужны разбивка по платформам, ссылки на фото или
+`changeTime`, передавайте `view: "full"` явно.
+
 ## Чтение
 
 ### Продавец и каталог
@@ -45,9 +71,9 @@
 | Инструмент | Назначение |
 | --- | --- |
 | `wb_list_campaigns` | Кампании продвижения. |
-| `wb_get_campaign_counts` | Кампании, сгруппированные WB по статусу и типу. |
+| `wb_get_campaign_counts` | Кампании, сгруппированные WB по статусу и типу. Поддерживает `view`. |
 | `wb_get_campaign` | Одна рекламная кампания. |
-| `wb_get_campaign_stats` | Дневная статистика кампаний. |
+| `wb_get_campaign_stats` | Дневная статистика кампаний. Поддерживает `view`. |
 | `wb_get_campaign_spend_history` | История списаний и пополнений рекламного бюджета. |
 | `wb_get_campaign_bids` | Рекомендованные ставки товара. |
 | `wb_get_minimum_campaign_bids` | Минимальные ставки товаров по зонам размещения. |
@@ -61,7 +87,7 @@
 | `wb_get_sales_funnel` | Воронка продаж. |
 | `wb_get_search_queries` | Поисковая аналитика. |
 | `wb_get_stock_analytics` | Аналитика остатков. |
-| `wb_get_stock_products` | Товарный отчёт об остатках и оборачиваемости. |
+| `wb_get_stock_products` | Товарный отчёт об остатках и оборачиваемости. Поддерживает `view`. |
 | `wb_get_wb_warehouse_stocks` | Текущие остатки по размерам и складам WB. |
 | `wb_get_report_status` | Статусы асинхронных отчётов. |
 
