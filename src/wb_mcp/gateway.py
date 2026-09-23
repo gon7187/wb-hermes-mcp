@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
+from time import sleep as _default_sleep
 from types import MappingProxyType
 from typing import Final, TypeAlias, cast
 from uuid import UUID, uuid4
@@ -26,12 +27,14 @@ from wildberries_sdk import (
     reports,
 )
 
-
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 )
 PayloadAdapter: TypeAlias = Callable[[Mapping[str, object]], Mapping[str, object]]
 MAX_RAW_RESPONSE_BYTES: Final = 128 * 1024 * 1024
+RETRY_ATTEMPTS: Final = 3
+RETRY_BASE_DELAY_SECONDS: Final = 2.0
+_RETRYABLE_KINDS: Final = frozenset({"rate_limited", "service_unavailable"})
 _CARD_UPDATE_SNAPSHOT_FIELDS: Final = frozenset(
     {"brand", "title", "description", "dimensions", "characteristics"}
 )
@@ -526,15 +529,13 @@ def _adapt_campaign_id(payload: Mapping[str, object]) -> Mapping[str, object]:
 
 def _adapt_search_cluster_stats(payload: Mapping[str, object]) -> Mapping[str, object]:
     _allow_only(payload, {"date_from", "date_to", "items"})
-    items = _require_list(payload, "items")
     request = promotion.V1GetNormQueryStatsRequest.model_validate(
         {
             "from": _require_date(payload, "date_from"),
             "to": _require_date(payload, "date_to"),
             "items": [
-                {"advertId": _require_int(item, "campaign_id"),
-                 "nmId": _require_int(item, "nm_id")}
-                for item in items
+                {"advertId": pair["advert_id"], "nmId": pair["nm_id"]}
+                for pair in _require_cluster_pairs(payload)
             ],
         }
     )
@@ -554,6 +555,101 @@ def _adapt_search_clusters(payload: Mapping[str, object]) -> Mapping[str, object
         }
     )
     return {"v0_get_norm_query_list_request": request}
+
+
+def _require_cluster_pairs(payload: Mapping[str, object]) -> list[dict[str, int]]:
+    """Normalise a list of {campaign_id, nm_id} pairs for normquery endpoints."""
+
+    raw_items = _require_list(payload, "items")
+    if not raw_items:
+        raise ValueError("cluster items must not be empty")
+    if len(raw_items) > 100:
+        raise ValueError("cluster items exceed the documented maximum of 100")
+    pairs: list[dict[str, int]] = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            raise ValueError("cluster item is invalid")
+        _allow_only(item, {"campaign_id", "nm_id"})
+        pairs.append(
+            {
+                "advert_id": _require_int(item, "campaign_id"),
+                "nm_id": _require_int(item, "nm_id"),
+            }
+        )
+    return pairs
+
+
+def _adapt_get_minus_phrases(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"items"})
+    request = promotion.V0GetNormQueryMinusRequest.model_validate(
+        {"items": _require_cluster_pairs(payload)}
+    )
+    return {"v0_get_norm_query_minus_request": request}
+
+
+def _adapt_get_cluster_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"items"})
+    request = promotion.V0GetNormQueryBidsRequest.model_validate(
+        {"items": _require_cluster_pairs(payload)}
+    )
+    return {"v0_get_norm_query_bids_request": request}
+
+
+def _require_cluster_bid_items(
+    payload: Mapping[str, object], *, with_bid: bool
+) -> list[dict[str, object]]:
+    """Normalise per-cluster bid rows shared by the set and delete endpoints."""
+
+    raw_bids = _require_list(payload, "bids")
+    if not raw_bids:
+        raise ValueError("cluster bids must not be empty")
+    if len(raw_bids) > 100:
+        raise ValueError("cluster bids exceed the documented maximum of 100")
+    allowed = {"campaign_id", "nm_id", "norm_query"}
+    if with_bid:
+        allowed = allowed | {"bid"}
+    rows: list[dict[str, object]] = []
+    for item in raw_bids:
+        if not isinstance(item, Mapping):
+            raise ValueError("cluster bid is invalid")
+        _allow_only(item, allowed)
+        row: dict[str, object] = {
+            "advert_id": _require_int(item, "campaign_id"),
+            "nm_id": _require_int(item, "nm_id"),
+            "norm_query": _require_str(item, "norm_query"),
+        }
+        if with_bid:
+            bid = _require_int(item, "bid")
+            if bid <= 0:
+                raise ValueError("cluster bid must be positive")
+            # ponytail: WB takes normquery bids in whole roubles, not kopecks.
+            row["bid"] = bid
+        rows.append(row)
+    return rows
+
+
+def _adapt_update_cluster_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"bids"})
+    request = promotion.V0SetNormQueryBidsRequest.model_validate(
+        {"bids": _require_cluster_bid_items(payload, with_bid=True)}
+    )
+    return {"v0_set_norm_query_bids_request": request}
+
+
+def _adapt_reset_cluster_bids(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"bids"})
+    request = promotion.V0DeleteNormQueryBidsRequest.model_validate(
+        {"bids": _require_cluster_bid_items(payload, with_bid=False)}
+    )
+    return {"v0_delete_norm_query_bids_request": request}
+
+
+def _adapt_budget_deposits(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"date_from", "date_to"})
+    return {
+        "var_from": _require_date(payload, "date_from"),
+        "to": _require_date(payload, "date_to"),
+    }
 
 
 def _adapt_list_sales(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -1137,6 +1233,26 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             method="adv_v0_normquery_list_post",
             payload_adapter=_adapt_search_clusters,
         ),
+        "minus_phrases": Operation(
+            client="promotion",
+            method="adv_v0_normquery_get_minus_post",
+            payload_adapter=_adapt_get_minus_phrases,
+        ),
+        "cluster_bids": Operation(
+            client="promotion",
+            method="adv_v0_normquery_get_bids_post",
+            payload_adapter=_adapt_get_cluster_bids,
+        ),
+        "adv_balance": Operation(
+            client="promotion",
+            method="adv_v1_balance_get",
+            payload_adapter=_require_empty_payload,
+        ),
+        "budget_deposits": Operation(
+            client="promotion",
+            method="adv_v1_upd_get",
+            payload_adapter=_adapt_budget_deposits,
+        ),
         "list_sales": Operation(
             client="reports",
             method="api_v1_supplier_sales_get",
@@ -1250,6 +1366,18 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             mutation=True,
             payload_adapter=_adapt_set_minus_phrases,
         ),
+        "update_cluster_bids": Operation(
+            client="promotion",
+            method="adv_v0_normquery_bids_post",
+            mutation=True,
+            payload_adapter=_adapt_update_cluster_bids,
+        ),
+        "reset_cluster_bids": Operation(
+            client="promotion",
+            method="adv_v0_normquery_bids_delete",
+            mutation=True,
+            payload_adapter=_adapt_reset_cluster_bids,
+        ),
         "start_report": Operation(
             client="analytics",
             method="api_v2_nm_report_downloads_post",
@@ -1360,10 +1488,16 @@ def _as_result(value: object) -> dict[str, object]:
 class WildberriesGateway:
     """Dispatch only registry-listed operations to generated SDK clients."""
 
-    def __init__(self, token: str, clients: Mapping[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        clients: Mapping[str, object] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
         self._clients = (
             dict(clients) if clients is not None else _create_sdk_clients(token)
         )
+        self._sleep = sleep if sleep is not None else _default_sleep
 
     def read(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
         return self._invoke(operation, payload, mutation=False)
@@ -1443,9 +1577,13 @@ class WildberriesGateway:
             )
 
         try:
-            response = method(**arguments)
+            response = self._call_with_retry(
+                operation_name, method, arguments, mutation=mutation
+            )
             if operation.raw_json:
                 response = _read_raw_json_response(response)
+        except WBError:
+            raise
         except Exception as error:
             raise self._sdk_error(operation_name, error) from None
 
@@ -1458,6 +1596,36 @@ class WildberriesGateway:
                 message="Wildberries returned a response that cannot be serialized safely.",
                 retryable=False,
             ) from error
+
+    def _call_with_retry(
+        self,
+        operation_name: str,
+        method: Callable[..., object],
+        arguments: Mapping[str, object],
+        *,
+        mutation: bool,
+    ) -> object:
+        """Call an SDK method, retrying throttled reads with linear backoff.
+
+        Writes are never retried: WB budget deposits are not idempotent, so a
+        silent second attempt could double-charge the account.
+        """
+
+        attempt = 0
+        while True:
+            try:
+                return method(**arguments)
+            except Exception as error:
+                wrapped = self._sdk_error(operation_name, error)
+                if (
+                    mutation
+                    or not wrapped.retryable
+                    or attempt >= RETRY_ATTEMPTS
+                    or wrapped.kind not in _RETRYABLE_KINDS
+                ):
+                    raise wrapped from None
+                attempt += 1
+                self._sleep(RETRY_BASE_DELAY_SECONDS * attempt)
 
     @staticmethod
     def _sdk_error(operation: str, error: Exception) -> WBError:

@@ -971,6 +971,63 @@ class UpdateBidsPayload(CampaignIdPayload):
     )
 
 
+class ClusterPair(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+    nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
+
+
+class ClusterPairsPayload(PayloadModel):
+    items: list[ClusterPair] = Field(
+        min_length=1,
+        max_length=100,
+        description="Пары кампания-артикул, до 100 за вызов.",
+    )
+
+    @model_validator(mode="after")
+    def unique_pairs(self) -> ClusterPairsPayload:
+        pairs = [(item.campaign_id, item.nm_id) for item in self.items]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("Duplicate campaign/product pair")
+        return self
+
+
+class ClusterBid(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+    nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
+    norm_query: StrictStr = Field(
+        min_length=1, description="Поисковый кластер.", examples=["кресло"]
+    )
+    bid: StrictInt = Field(
+        gt=0,
+        description="Ставка кластера в РУБЛЯХ за 1000 показов (не в копейках).",
+        examples=[490],
+    )
+
+
+class UpdateClusterBidsPayload(PayloadModel):
+    bids: list[ClusterBid] = Field(
+        min_length=1,
+        max_length=100,
+        description="Персональные ставки кластеров, до 100 за вызов.",
+    )
+
+
+class ResetClusterBid(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+    nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
+    norm_query: StrictStr = Field(
+        min_length=1, description="Поисковый кластер.", examples=["кресло"]
+    )
+
+
+class ResetClusterBidsPayload(PayloadModel):
+    bids: list[ResetClusterBid] = Field(
+        min_length=1,
+        max_length=100,
+        description="Кластеры, которым возвращается базовая ставка кампании.",
+    )
+
+
 class MinusPhrasesPayload(CampaignBidsPayload):
     phrases: list[StrictStr] = Field(
         max_length=1000,
@@ -1493,6 +1550,74 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
         "mutation": False,
         "plan_then_apply": False,
     },
+    "wb_get_minus_phrases": {
+        "description": (
+            "Возвращает текущие минус-фразы. Обязательно вызвать перед "
+            "wb_plan_update_minus_phrases: запись заменяет список целиком."
+        ),
+        "required_payload_keys": ["items"],
+        "example": {"payload": {"items": [{"campaign_id": 123456, "nm_id": 987654321}]}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_cluster_bids": {
+        "description": "Возвращает персональные ставки кластеров кампании.",
+        "required_payload_keys": ["items"],
+        "example": {"payload": {"items": [{"campaign_id": 123456, "nm_id": 987654321}]}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_adv_balance": {
+        "description": (
+            "Возвращает рекламный баланс: счёт, баланс и бонусы. "
+            "Это не финансовый баланс продавца из wb_get_balance."
+        ),
+        "required_payload_keys": [],
+        "example": {"payload": {}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_get_budget_deposits": {
+        "description": "Возвращает историю пополнений рекламных бюджетов за период до 31 дня.",
+        "required_payload_keys": ["date_from", "date_to"],
+        "example": {"payload": {"date_from": "2026-07-01", "date_to": "2026-07-02"}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_plan_update_cluster_bids": {
+        "description": (
+            "Планирует персональные ставки кластеров. Ставка в РУБЛЯХ за 1000 показов, "
+            "не в копейках. Работает только на CPM-кампаниях с раздельными зонами."
+        ),
+        "required_payload_keys": ["bids"],
+        "example": {
+            "payload": {
+                "bids": [
+                    {
+                        "campaign_id": 123456,
+                        "nm_id": 987654321,
+                        "norm_query": "кресло",
+                        "bid": 490,
+                    }
+                ]
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
+    "wb_plan_reset_cluster_bids": {
+        "description": "Планирует возврат кластеров на базовую ставку кампании.",
+        "required_payload_keys": ["bids"],
+        "example": {
+            "payload": {
+                "bids": [
+                    {"campaign_id": 123456, "nm_id": 987654321, "norm_query": "кресло"}
+                ]
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
+    },
     "wb_get_sales_funnel": {
         "description": "Возвращает воронку продаж по выбранным товарам и датам.",
         "required_payload_keys": ["nm_ids", "date_from", "date_to"],
@@ -1892,6 +2017,76 @@ def _operation_help(tool_name: str) -> dict[str, object] | None:
     if details is None:
         return None
     return {"ok": True, "tool": tool_name, **details}
+
+
+_PLACEMENT_FIELDS: dict[str, tuple[str, ...]] = {
+    "search": ("search",),
+    "recommendations": ("recommendations",),
+    "combined": ("search", "recommendations"),
+}
+
+
+def _verify_applied_bids(
+    wb_gateway: WildberriesGateway, payload: Mapping[str, object]
+) -> dict[str, object] | None:
+    """Read the campaign back and report bids WB did not actually store."""
+
+    campaign_id = payload.get("campaign_id")
+    requested = payload.get("bids")
+    if not isinstance(campaign_id, int) or not isinstance(requested, list):
+        return None
+    try:
+        current = wb_gateway.read("get_campaign", {"campaign_id": campaign_id})
+    except WBError:
+        return {"checked": False, "reason": "campaign_read_failed"}
+
+    adverts = current.get("adverts")
+    if not isinstance(adverts, list) or not adverts:
+        return {"checked": False, "reason": "campaign_not_returned"}
+    stored: dict[int, Mapping[str, object]] = {}
+    for advert in adverts:
+        if not isinstance(advert, Mapping):
+            continue
+        for setting in advert.get("nm_settings") or []:
+            if not isinstance(setting, Mapping):
+                continue
+            nm_id = setting.get("nm_id")
+            bids = setting.get("bids_kopecks")
+            if isinstance(nm_id, int) and isinstance(bids, Mapping):
+                stored[nm_id] = bids
+
+    mismatched: list[dict[str, object]] = []
+    for bid in requested:
+        if not isinstance(bid, Mapping):
+            continue
+        nm_id = bid.get("nm_id")
+        expected = bid.get("bid_kopecks")
+        placement = bid.get("placement")
+        if not isinstance(nm_id, int) or not isinstance(expected, int):
+            continue
+        actual_bids = stored.get(nm_id)
+        if actual_bids is None:
+            mismatched.append({"nm_id": nm_id, "reason": "product_not_in_campaign"})
+            continue
+        for field in _PLACEMENT_FIELDS.get(str(placement), ()):
+            actual = actual_bids.get(field)
+            if actual != expected:
+                mismatched.append(
+                    {
+                        "nm_id": nm_id,
+                        "placement": field,
+                        "expected_kopecks": expected,
+                        "actual_kopecks": actual,
+                    }
+                )
+    if mismatched:
+        return {
+            "checked": True,
+            "applied": False,
+            "mismatched": mismatched,
+            "hint": "WB confirmed the write but kept the old bid; repeat the plan.",
+        }
+    return {"checked": True, "applied": True}
 
 
 def create_server(
@@ -2472,6 +2667,68 @@ def create_server(
         return read_tool("search_clusters", _as_payload(parsed))
 
     @mcp.tool(
+        name="wb_get_minus_phrases",
+        description=(
+            "Возвращает текущие минус-фразы товаров в кампаниях WB. "
+            "ОБЯЗАТЕЛЬНО вызовите перед wb_plan_update_minus_phrases: запись "
+            "заменяет весь список, и незачитанные фразы будут потеряны."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_minus_phrases(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ClusterPairsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("minus_phrases", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_cluster_bids",
+        description=(
+            "Возвращает персональные ставки поисковых кластеров. Ставка приходит "
+            "в рублях за 1000 показов и перебивает общую ставку кампании."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_cluster_bids(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ClusterPairsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("cluster_bids", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_get_adv_balance",
+        description=(
+            "Возвращает рекламный баланс кабинета: счёт, баланс и бонусы. "
+            "Это отдельный от wb_get_balance счёт, именно с него пополняются кампании."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_adv_balance(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, EmptyPayload, optional=True)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("adv_balance", {})
+
+    @mcp.tool(
+        name="wb_get_budget_deposits",
+        description=(
+            "Возвращает историю пополнений рекламных бюджетов за период до 31 дня. "
+            "Позволяет увидеть, упирается ли кампания в автопополнение: если сумма "
+            "пополнений за сутки равна расходу, бюджет выкручивается в ноль."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_get_budget_deposits(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, DateRangePayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return read_tool("budget_deposits", _as_payload(parsed))
+
+    @mcp.tool(
         name="wb_list_sales",
         description=(
             "Возвращает продажи и возвраты продавца WB начиная с даты-времени RFC3339."
@@ -2707,8 +2964,10 @@ def create_server(
         name="wb_plan_update_minus_phrases",
         description=(
             "Создаёт подтверждаемый план полной установки минус-фраз одного товара в "
-            "кампании WB. Пустой список очищает все минус-фразы. Перед применением "
-            "сначала изучите wb_get_search_clusters."
+            "кампании WB. ВНИМАНИЕ: список заменяется ЦЕЛИКОМ, пустой список очищает "
+            "все минус-фразы. Сначала прочитайте текущие через wb_get_minus_phrases и "
+            "объедините их со своими, иначе чужие исключения будут потеряны. "
+            "CPC-кампании эту ручку не поддерживают."
         ),
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
@@ -2718,6 +2977,39 @@ def create_server(
         if parsed is None:
             return _validation_error()
         return plan_tool("set_minus_phrases", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_update_cluster_bids",
+        description=(
+            "Создаёт подтверждаемый план персональных ставок поисковых кластеров WB. "
+            "Ставка задаётся в РУБЛЯХ за 1000 показов, не в копейках, и перебивает "
+            "общую ставку кампании. Работает только на CPM-кампаниях с раздельными "
+            "зонами: на авто-таргете и CPC ставки кластеров не действуют. "
+            "До 100 кластеров за вызов."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_cluster_bids(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdateClusterBidsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("update_cluster_bids", _as_payload(parsed))
+
+    @mcp.tool(
+        name="wb_plan_reset_cluster_bids",
+        description=(
+            "Создаёт подтверждаемый план возврата кластеров на базовую ставку "
+            "кампании WB, снимая персональные ставки. До 100 кластеров за вызов."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_reset_cluster_bids(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, ResetClusterBidsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("reset_cluster_bids", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_start_report",
@@ -2839,12 +3131,19 @@ def create_server(
             result = wb_gateway.write(plan.operation, plan.payload)
         except WBError as error:
             return _gateway_error(error)
-        return {
+        response: dict[str, object] = {
             "ok": True,
             "status": "applied",
             "operation": plan.operation,
             "result": result,
         }
+        if plan.operation == "update_bids":
+            # WB occasionally answers 200 without storing the new bid, so the
+            # campaign is read back and the mismatch is reported to the caller.
+            verification = _verify_applied_bids(wb_gateway, plan.payload)
+            if verification is not None:
+                response["verification"] = verification
+        return response
 
     mcp.register_payload_input("wb_get_seller_profile", EmptyPayload, required=False)
     mcp.register_payload_input("wb_get_tariffs", TariffsPayload, required=False)
@@ -2909,6 +3208,20 @@ def create_server(
     )
     mcp.register_payload_input(
         "wb_get_search_clusters", SearchClustersPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_get_minus_phrases", ClusterPairsPayload, required=True
+    )
+    mcp.register_payload_input("wb_get_cluster_bids", ClusterPairsPayload, required=True)
+    mcp.register_payload_input("wb_get_adv_balance", EmptyPayload, required=False)
+    mcp.register_payload_input(
+        "wb_get_budget_deposits", DateRangePayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_update_cluster_bids", UpdateClusterBidsPayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_reset_cluster_bids", ResetClusterBidsPayload, required=True
     )
     mcp.register_payload_input("wb_list_sales", SalesPayload, required=True)
     mcp.register_payload_input("wb_get_sales_funnel", NmDateRangePayload, required=True)

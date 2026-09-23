@@ -624,8 +624,44 @@ async def test_remaining_plan_tools_defer_one_named_write_until_apply(
         )
 
     assert applied.isError is False
-    assert len(gateway.calls) == 1
-    assert gateway.calls[0][:2] == ("write", operation)
+    writes = [call for call in gateway.calls if call[0] == "write"]
+    assert len(writes) == 1
+    assert writes[0][:2] == ("write", operation)
+
+
+@pytest.mark.anyio
+async def test_apply_reports_bids_wildberries_confirmed_but_did_not_store() -> None:
+    """WB sometimes answers 200 while keeping the old bid; apply must say so."""
+
+    class StaleBidGateway(RecordingGateway):
+        def read(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
+            super().read(operation, payload)
+            return {
+                "adverts": [
+                    {"nm_settings": [{"nm_id": 2, "bids_kopecks": {"search": 42900}}]}
+                ]
+            }
+
+    gateway = StaleBidGateway()
+    wb_server = server.create_server(token="test-token", gateway=gateway)
+    payload = {
+        "campaign_id": 1,
+        "bids": [{"nm_id": 2, "bid_kopecks": 51500, "placement": "search"}],
+    }
+
+    async with create_connected_server_and_client_session(
+        wb_server, raise_exceptions=True
+    ) as client:
+        planned = await client.call_tool("wb_plan_update_bids", {"payload": payload})
+        confirmation_id = planned.structuredContent["confirmation_id"]
+        applied = await client.call_tool(
+            "wb_apply_change", {"confirmation_id": confirmation_id}
+        )
+
+    verification = applied.structuredContent["verification"]
+    assert verification["applied"] is False
+    assert verification["mismatched"][0]["actual_kopecks"] == 42900
+    assert verification["mismatched"][0]["expected_kopecks"] == 51500
 
 
 @pytest.mark.anyio

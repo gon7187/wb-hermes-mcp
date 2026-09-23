@@ -197,7 +197,9 @@ def test_gateway_normalizes_sdk_errors_without_exposing_tokens_or_urls() -> None
         def get_v1_seller_info(self) -> dict[str, object]:
             raise RateLimitedError
 
-    gateway = WildberriesGateway(token, clients={"general": General()})
+    gateway = WildberriesGateway(
+        token, clients={"general": General()}, sleep=lambda _: None
+    )
 
     with pytest.raises(WBError) as caught:
         gateway.read("seller_profile", {})
@@ -628,6 +630,108 @@ def test_deposit_rejects_an_amount_below_the_documented_minimum() -> None:
         gateway.validate_write(
             "deposit_campaign_budget",
             {"campaign_id": 77, "amount": 999, "source_type": 1},
+        )
+
+    assert caught.value.kind == "invalid_payload"
+
+
+def test_throttled_reads_are_retried_until_they_succeed() -> None:
+    attempts: list[int] = []
+
+    class RateLimitedError(Exception):
+        status = 429
+
+    class General:
+        def get_v1_seller_info(self) -> dict[str, object]:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise RateLimitedError
+            return {"name": "seller"}
+
+    delays: list[float] = []
+    gateway = WildberriesGateway(
+        "test-token", clients={"general": General()}, sleep=delays.append
+    )
+
+    assert gateway.read("seller_profile", {}) == {"name": "seller"}
+    assert len(attempts) == 3
+    assert delays == [2.0, 4.0]
+
+
+def test_throttled_writes_are_never_retried() -> None:
+    """A budget deposit is not idempotent, so a silent retry could double-charge."""
+
+    attempts: list[int] = []
+
+    class RateLimitedError(Exception):
+        status = 429
+
+    class Promotion:
+        def adv_v1_budget_deposit_post(self, **_: object) -> dict[str, object]:
+            attempts.append(1)
+            raise RateLimitedError
+
+    gateway = WildberriesGateway(
+        "test-token", clients={"promotion": Promotion()}, sleep=lambda _: None
+    )
+
+    with pytest.raises(WBError) as caught:
+        gateway.write(
+            "deposit_campaign_budget",
+            {"campaign_id": 77, "amount": 3000, "source_type": 1},
+        )
+
+    assert caught.value.kind == "rate_limited"
+    assert len(attempts) == 1
+
+
+def test_cluster_bids_are_sent_in_roubles_per_thousand_impressions() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    _, arguments = gateway._validated_arguments(
+        "update_cluster_bids",
+        {
+            "bids": [
+                {
+                    "campaign_id": 77,
+                    "nm_id": 99,
+                    "norm_query": "кресло",
+                    "bid": 490,
+                }
+            ]
+        },
+        mutation=True,
+    )
+
+    request = arguments["v0_set_norm_query_bids_request"]
+    body = getattr(request, "model_dump")(mode="json", by_alias=True)
+    assert body["bids"][0]["bid"] == 490
+    assert body["bids"][0]["norm_query"] == "кресло"
+
+
+def test_cluster_bids_reject_a_non_positive_bid() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    with pytest.raises(WBError) as caught:
+        gateway.validate_write(
+            "update_cluster_bids",
+            {
+                "bids": [
+                    {"campaign_id": 77, "nm_id": 99, "norm_query": "кресло", "bid": 0}
+                ]
+            },
+        )
+
+    assert caught.value.kind == "invalid_payload"
+
+
+def test_cluster_reads_reject_more_than_the_documented_hundred_pairs() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    with pytest.raises(WBError) as caught:
+        gateway.read(
+            "minus_phrases",
+            {"items": [{"campaign_id": i, "nm_id": i} for i in range(101)]},
         )
 
     assert caught.value.kind == "invalid_payload"

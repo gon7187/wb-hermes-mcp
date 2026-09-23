@@ -53,6 +53,10 @@
 | `wb_get_minimum_campaign_bids` | Минимальные ставки товаров по зонам размещения. |
 | `wb_get_campaign_budget` | Бюджет кампании. |
 | `wb_get_search_clusters` | Нормализованные поисковые кластеры. |
+| `wb_get_minus_phrases` | Текущие минус-фразы; читать перед `wb_plan_update_minus_phrases`. |
+| `wb_get_cluster_bids` | Персональные ставки кластеров (в рублях за 1000 показов). |
+| `wb_get_adv_balance` | Рекламный баланс: счёт, баланс, бонусы. |
+| `wb_get_budget_deposits` | История пополнений рекламных бюджетов за период до 31 дня. |
 | `wb_list_sales` | Продажи и возвраты продавца с указанной даты-времени. |
 | `wb_get_sales_funnel` | Воронка продаж. |
 | `wb_get_search_queries` | Поисковая аналитика. |
@@ -91,7 +95,9 @@
 | `wb_plan_update_supply` | Заказы и доставка FBS-поставки. |
 | `wb_plan_update_campaign` | Создание, запуск, пауза, остановка, удаление или переименование кампании. |
 | `wb_plan_update_bids` | Ставки кампании в копейках. |
-| `wb_plan_update_minus_phrases` | Полная установка минус-фраз; пустой список очищает их. |
+| `wb_plan_update_minus_phrases` | Полная установка минус-фраз; список заменяется целиком, пустой очищает его. |
+| `wb_plan_update_cluster_bids` | Персональные ставки кластеров в рублях за 1000 показов. |
+| `wb_plan_reset_cluster_bids` | Возврат кластеров на базовую ставку кампании. |
 | `wb_plan_start_report` | Запуск отчёта воронки продаж. |
 | `wb_plan_reply_feedback` | Ответ на отзыв. |
 | `wb_plan_reply_question` | Ответ на вопрос. |
