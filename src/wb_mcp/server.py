@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from .audit import audit as run_audit
 from .changes import ChangePlan, ChangeStore, ConfirmationError
 from .gateway import WBError, WildberriesGateway
 
@@ -762,6 +763,14 @@ class DateRangePayload(PayloadModel):
         if self.date_from > self.date_to:
             raise ValueError("date_from must not be after date_to")
         return self
+
+
+class AuditPayload(DateRangePayload):
+    campaign_ids: list[StrictInt] | None = Field(
+        default=None,
+        max_length=100,
+        description="Необязательно: до 100 ID. По умолчанию все активные (статус 9).",
+    )
 
 
 class SearchClusterStatsPayload(DateRangePayload):
@@ -1625,6 +1634,16 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
         "description": "Возвращает историю пополнений рекламных бюджетов за период до 31 дня.",
         "required_payload_keys": ["date_from", "date_to"],
         "example": {"payload": {"date_from": "2026-07-01", "date_to": "2026-07-02"}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_audit_campaigns": {
+        "description": (
+            "Аудит активных РК за период: какой канал (поиск / реки+каталог) "
+            "оставить, кластеры-кандидаты в минус, слабые кампании. Только чтение."
+        ),
+        "required_payload_keys": ["date_from", "date_to"],
+        "example": {"payload": {"date_from": "2026-09-18", "date_to": "2026-09-24"}},
         "mutation": False,
         "plan_then_apply": False,
     },
@@ -3170,6 +3189,38 @@ def create_server(
         return plan_tool("set_minus_phrases", _as_payload(parsed))
 
     @mcp.tool(
+        name="wb_audit_campaigns",
+        description=(
+            "Аудит рекламы WB за период (рекомендуется 7 дней), только чтение, ~30 сек. "
+            "Для каждой активной CPM-кампании с ручной ставкой и обеими зонами делит "
+            "расход на поиск (по статистике кластеров) и остальное (реки + каталог), "
+            "считает ДРР каналов и выдаёт verdict: disable_search / "
+            "disable_recommendations / keep_both / both_weak. suggested_placements "
+            "готов для wb_plan_update_placements. cluster_candidates — кластеры без "
+            "заказов с заметным расходом: перед исключением проверьте релевантность "
+            "(широкий или чужой запрос — в минус, свой с корзинами — оставить) и "
+            "дописывайте к текущим минус-фразам. campaign_flags — РК с ДРР > 25% или "
+            "без заказов. new=true — РК младше 7 дней, данных мало. Любые изменения "
+            "показывайте пользователю и применяйте только после подтверждения."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_audit_campaigns(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, AuditPayload, optional=False)
+        if not isinstance(parsed, AuditPayload):
+            return _validation_error()
+        try:
+            return run_audit(
+                wb_gateway.read,
+                parsed.date_from,
+                parsed.date_to,
+                parsed.campaign_ids,
+            )
+        except WBError as error:
+            return _gateway_error(error)
+
+    @mcp.tool(
         name="wb_plan_update_placements",
         description=(
             "Создаёт подтверждаемый план включения/выключения зон показа WB: поиск "
@@ -3428,6 +3479,7 @@ def create_server(
     mcp.register_payload_input(
         "wb_get_budget_deposits", DateRangePayload, required=True
     )
+    mcp.register_payload_input("wb_audit_campaigns", AuditPayload, required=True)
     mcp.register_payload_input(
         "wb_plan_update_placements", UpdatePlacementsPayload, required=True
     )
