@@ -57,11 +57,11 @@ def _pick(mapping: Mapping[str, object], *keys: str) -> object:
     return None
 
 
-def _list(value: object) -> list[object]:
+def as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
 
-def _map(value: object) -> Mapping[str, object]:
+def as_map(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
@@ -136,7 +136,7 @@ def audit(
     )
     adverts = [
         a
-        for a in _list(read("list_campaigns", listing).get("adverts"))
+        for a in as_list(read("list_campaigns", listing).get("adverts"))
         if isinstance(a, Mapping) and a.get("status") == 9
     ]
     campaigns: dict[int, Mapping[str, object]] = {}
@@ -155,8 +155,8 @@ def audit(
             "date_to": date_to,
         }
         response = _read_patiently(read, "campaign_stats", payload, sleep)
-        for row in _list(response.get("data")):
-            row = _map(row)
+        for row in as_list(response.get("data")):
+            row = as_map(row)
             advert_id = row.get("advertId")
             if isinstance(advert_id, int):
                 stats[advert_id] = row
@@ -177,14 +177,14 @@ def audit(
     for chunk in _chunks(pairs, CLUSTER_CHUNK):
         payload = {"date_from": date_from, "date_to": date_to, "items": chunk}
         response = _read_patiently(read, "search_cluster_stats", payload, sleep)
-        for item in _list(response.get("items") or response.get("stats")):
-            item = _map(item)
+        for item in as_list(response.get("items") or response.get("stats")):
+            item = as_map(item)
             advert_id = _pick(item, "advertId", "advert_id")
             if not isinstance(advert_id, int):
                 continue
             per_query = clusters.setdefault(advert_id, {})
-            for day in _list(_pick(item, "dailyStats", "daily_stats")):
-                stat = _map(day).get("stat")
+            for day in as_list(_pick(item, "dailyStats", "daily_stats")):
+                stat = as_map(day).get("stat")
                 if not isinstance(stat, Mapping):
                     continue
                 query = str(_pick(stat, "normQuery", "norm_query") or "")
@@ -194,11 +194,11 @@ def audit(
                 for key in acc:
                     acc[key] += _num(stat.get(key))
         minus_response = _read_patiently(read, "minus_phrases", {"items": chunk}, sleep)
-        for item in _list(minus_response.get("items")):
-            item = _map(item)
+        for item in as_list(minus_response.get("items")):
+            item = as_map(item)
             advert_id = item.get("advert_id")
             if isinstance(advert_id, int):
-                minus[advert_id] = {str(q) for q in _list(item.get("norm_queries"))}
+                minus[advert_id] = {str(q) for q in as_list(item.get("norm_queries"))}
 
     new_since = date_to - timedelta(days=NEW_CAMPAIGN_DAYS)
     total_spend = total_revenue = total_orders = 0.0
@@ -218,9 +218,9 @@ def audit(
         total_spend += spend
         total_revenue += revenue
         total_orders += orders
-        settings = _map(advert.get("settings"))
+        settings = as_map(advert.get("settings"))
         name = str(settings.get("name", ""))
-        created = str(_map(advert.get("timestamps")).get("created") or "")[:10]
+        created = str(as_map(advert.get("timestamps")).get("created") or "")[:10]
         is_new = bool(created) and created > new_since.isoformat()
         avg_price = revenue / orders if orders else 0.0
         base = {"campaign_id": advert_id, "name": name, "new": is_new}
@@ -255,7 +255,7 @@ def audit(
                     }
                 )
 
-        placements = _map(settings.get("placements"))
+        placements = as_map(settings.get("placements"))
         both_on = bool(placements.get("search") and placements.get("recommendations"))
         if not both_on:
             continue
@@ -285,7 +285,8 @@ def audit(
     zones.sort(
         key=lambda z: (
             str(z["verdict"]),
-            -_num(_map(z["search"]).get("spend")) - _num(_map(z["rest"]).get("spend")),
+            -_num(as_map(z["search"]).get("spend"))
+            - _num(as_map(z["rest"]).get("spend")),
         )
     )
     cluster_candidates.sort(key=lambda c: -_num(c["spend"]))

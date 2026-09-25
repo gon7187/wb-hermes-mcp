@@ -763,3 +763,25 @@ def test_placements_refuse_to_switch_off_both_zones() -> None:
         gateway.validate_write("update_placements", {"campaigns": [both_off]})
 
     assert caught.value.kind == "invalid_payload"
+
+
+def test_fullstats_throttling_waits_long_enough_for_the_minute_limit() -> None:
+    attempts: list[int] = []
+
+    class RateLimitedError(Exception):
+        status = 429
+
+    class Promotion:
+        def adv_v1_promotion_count_get(self) -> dict[str, object]:
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise RateLimitedError
+            return {"adverts": []}
+
+    delays: list[float] = []
+    gateway = WildberriesGateway(
+        "test-token", clients={"promotion": Promotion()}, sleep=delays.append
+    )
+
+    gateway.read("campaign_counts", {})
+    assert delays == [20.0]

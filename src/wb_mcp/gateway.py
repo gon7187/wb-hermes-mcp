@@ -35,6 +35,9 @@ MAX_RAW_RESPONSE_BYTES: Final = 128 * 1024 * 1024
 RETRY_ATTEMPTS: Final = 3
 RETRY_BASE_DELAY_SECONDS: Final = 2.0
 _RETRYABLE_KINDS: Final = frozenset({"rate_limited", "service_unavailable"})
+# ponytail: WB allows ~1 call/min on fullstats; wait it out instead of erroring.
+SLOW_RATE_LIMIT_DELAY_SECONDS: Final = 20.0
+_SLOW_RATE_LIMIT_OPERATIONS: Final = frozenset({"campaign_stats", "campaign_counts"})
 _CARD_UPDATE_SNAPSHOT_FIELDS: Final = frozenset(
     {"brand", "title", "description", "dimensions", "characteristics"}
 )
@@ -1656,7 +1659,14 @@ class WildberriesGateway:
                 ):
                     raise wrapped from None
                 attempt += 1
-                self._sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+                slow = (
+                    wrapped.kind == "rate_limited"
+                    and operation_name in _SLOW_RATE_LIMIT_OPERATIONS
+                )
+                base = (
+                    SLOW_RATE_LIMIT_DELAY_SECONDS if slow else RETRY_BASE_DELAY_SECONDS
+                )
+                self._sleep(base * attempt)
 
     @staticmethod
     def _sdk_error(operation: str, error: Exception) -> WBError:

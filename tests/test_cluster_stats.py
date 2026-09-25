@@ -41,6 +41,6 @@ def test_invalid_input_rejected(change):
 
 def test_sdk_cluster_stats_adapter():
     parsed = server.SearchClusterStatsPayload.model_validate({'date_from':'2026-09-21','date_to':'2026-09-22','items':[{'campaign_id':123,'nm_id':456}]})
-    r = gateway._adapt_search_cluster_stats(parsed.model_dump())
+    r = gateway._adapt_search_cluster_stats(parsed.model_dump(exclude={'view'}))
     body = r['v1_get_norm_query_stats_request'].model_dump(mode='json',by_alias=True)
     assert body == {'from':'2026-09-21','to':'2026-09-22','items':[{'advertId':123,'nmId':456}]}
