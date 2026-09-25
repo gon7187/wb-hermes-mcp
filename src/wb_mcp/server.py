@@ -1036,6 +1036,22 @@ class UpdateClusterBidsPayload(PayloadModel):
     )
 
 
+class CampaignPlacements(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+    search: StrictBool = Field(description="Показывать в поиске (и каталоге).")
+    recommendations: StrictBool = Field(
+        description="Показывать на полках рекомендаций."
+    )
+
+
+class UpdatePlacementsPayload(PayloadModel):
+    campaigns: list[CampaignPlacements] = Field(
+        min_length=1,
+        max_length=50,
+        description="Кампании и их зоны показа, до 50 за вызов.",
+    )
+
+
 class ResetClusterBid(PayloadModel):
     campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
     nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
@@ -1611,6 +1627,22 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
         "example": {"payload": {"date_from": "2026-07-01", "date_to": "2026-07-02"}},
         "mutation": False,
         "plan_then_apply": False,
+    },
+    "wb_plan_update_placements": {
+        "description": (
+            "Планирует включение/выключение зон показа (поиск, рекомендации) у "
+            "CPM-кампаний с ручной ставкой. Хотя бы одна зона должна остаться."
+        ),
+        "required_payload_keys": ["campaigns"],
+        "example": {
+            "payload": {
+                "campaigns": [
+                    {"campaign_id": 123456, "search": False, "recommendations": True}
+                ]
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
     },
     "wb_plan_update_cluster_bids": {
         "description": (
@@ -3138,6 +3170,24 @@ def create_server(
         return plan_tool("set_minus_phrases", _as_payload(parsed))
 
     @mcp.tool(
+        name="wb_plan_update_placements",
+        description=(
+            "Создаёт подтверждаемый план включения/выключения зон показа WB: поиск "
+            "(вместе с каталогом) и рекомендации. Только CPM-кампании с ручной ставкой "
+            "в статусах 4/9/11; единая ставка и CPC не поддерживаются. Выключить обе "
+            "зоны нельзя — для этого пауза через wb_plan_update_campaign. До 50 "
+            "кампаний за вызов; лимит WB — 1 запрос в секунду."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_placements(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdatePlacementsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("update_placements", _as_payload(parsed))
+
+    @mcp.tool(
         name="wb_plan_update_cluster_bids",
         description=(
             "Создаёт подтверждаемый план персональных ставок поисковых кластеров WB. "
@@ -3377,6 +3427,9 @@ def create_server(
     mcp.register_payload_input("wb_get_adv_balance", EmptyPayload, required=False)
     mcp.register_payload_input(
         "wb_get_budget_deposits", DateRangePayload, required=True
+    )
+    mcp.register_payload_input(
+        "wb_plan_update_placements", UpdatePlacementsPayload, required=True
     )
     mcp.register_payload_input(
         "wb_plan_update_cluster_bids", UpdateClusterBidsPayload, required=True
