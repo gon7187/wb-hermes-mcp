@@ -146,3 +146,42 @@ async def test_list_campaigns_summary_drops_noise_fields() -> None:
     assert "currency" not in advert and "restrictions" not in advert
     assert advert["nms"] == [{"nm_id": 2, "bids_kopecks": None}]
     assert advert["created"] == "2026-09-01"
+
+
+class LiveMinusGateway(RecordingGateway):
+    """Stores minus phrases like WB does so writes can be read back."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stored = ["old"]
+
+    def read(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(("read", operation, payload))
+        return {"items": [{"advert_id": 1, "nm_id": 2, "norm_queries": self.stored}]}
+
+    def write(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(("write", operation, payload))
+        self.stored = list(payload["phrases"])  # type: ignore[arg-type]
+        return {}
+
+
+@pytest.mark.anyio
+async def test_add_rereads_phrases_at_apply_time_and_verifies() -> None:
+    g = LiveMinusGateway()
+    s = server.create_server(token="test-token", gateway=g)
+    payload = {"campaign_id": 1, "nm_id": 2, "phrases": ["  Диван ", "old"]}
+    async with create_connected_server_and_client_session(s) as client:
+        planned = await client.call_tool(
+            "wb_plan_update_minus_phrases", {"payload": payload}
+        )
+        plan = json.loads(planned.content[0].text)  # type: ignore[union-attr]
+        assert plan["preview"]["changing"] == ["диван"]
+        g.stored = ["old", "added in cabinet"]  # someone edits between plan and apply
+        applied = await client.call_tool(
+            "wb_apply_change", {"confirmation_id": plan["confirmation_id"]}
+        )
+
+    body = json.loads(applied.content[0].text)  # type: ignore[union-attr]
+    assert g.stored == ["old", "added in cabinet", "диван"]
+    assert body["ok"] is True
+    assert body["verification"] == {"missing": [], "not_removed": []}

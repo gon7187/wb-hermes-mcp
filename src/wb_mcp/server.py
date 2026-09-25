@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
@@ -1114,15 +1114,25 @@ class ResetClusterBidsPayload(PayloadModel):
 class MinusPhrasesPayload(CampaignBidsPayload):
     phrases: list[StrictStr] = Field(
         max_length=1000,
-        description="Минус-фразы; при mode=replace пустой список очищает все.",
-    )
-    mode: Literal["replace", "add", "remove"] = Field(
-        default="replace",
         description=(
-            "replace — заменить список целиком; add/remove — дописать к текущим "
-            "или убрать из них (текущие читаются автоматически)."
+            "Фразы для добавления/удаления; при mode=replace — весь новый список "
+            "(пустой очищает все)."
         ),
     )
+    mode: Literal["add", "remove", "replace"] = Field(
+        default="add",
+        description=(
+            "add (по умолчанию) — дописать к текущим; remove — убрать из текущих; "
+            "replace — заменить список целиком. Для add/remove текущие минус-фразы "
+            "выгружаются заново в момент применения, чужие не теряются."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def phrases_for_merge(self) -> MinusPhrasesPayload:
+        if self.mode != "replace" and not self.phrases:
+            raise ValueError("add/remove need at least one phrase")
+        return self
 
 
 class StartReportPayload(NmDateRangePayload):
@@ -1550,6 +1560,26 @@ def _confirmation_error(error: ConfirmationError) -> dict[str, object]:
             "retryable": False,
         },
     }
+
+
+MINUS_PHRASES_LIMIT: Final = 1000
+
+
+def _normalize_phrases(phrases: object) -> list[str]:
+    """WB stores normalized queries lower-case; dedupe while keeping order."""
+
+    seen: dict[str, None] = {}
+    for phrase in as_list(phrases):
+        text = " ".join(str(phrase).split()).lower()
+        if text:
+            seen.setdefault(text, None)
+    return list(seen)
+
+
+def _merge_phrases(existing: list[str], requested: list[str], mode: str) -> list[str]:
+    if mode == "add":
+        return existing + [q for q in requested if q not in existing]
+    return [q for q in existing if q not in requested]
 
 
 def _plan_result(plan: ChangePlan) -> dict[str, object]:
@@ -2466,7 +2496,12 @@ def create_server(
         validator = getattr(wb_gateway, "validate_write", None)
         try:
             if callable(validator):
-                validator(operation, canonical_payload)
+                if operation == "merge_minus_phrases":
+                    # Server-side op: validated as the full-list write it becomes.
+                    shape = {k: v for k, v in canonical_payload.items() if k != "mode"}
+                    validator("set_minus_phrases", shape)
+                else:
+                    validator(operation, canonical_payload)
             return _plan_result(plans.create(operation, canonical_payload))
         except WBError as error:
             return _gateway_error(error)
@@ -3353,13 +3388,25 @@ def create_server(
             return _validation_error()
         return plan_tool("update_bids", _as_payload(parsed))
 
+    def _current_minus_phrases(campaign_id: object, nm_id: object) -> list[str]:
+        pair = {"campaign_id": campaign_id, "nm_id": nm_id}
+        current = wb_gateway.read("minus_phrases", {"items": [pair]})
+        for item in as_list(current.get("items")):
+            item = as_map(item)
+            if item.get("advert_id") == campaign_id:
+                return [str(q) for q in as_list(item.get("norm_queries"))]
+        return []
+
     @mcp.tool(
         name="wb_plan_update_minus_phrases",
         description=(
             "Создаёт подтверждаемый план минус-фраз одного товара в кампании WB. "
-            "mode=add/remove сам читает текущие и дописывает/убирает (рекомендуется); "
-            "mode=replace заменяет список ЦЕЛИКОМ, пустой список очищает все. "
-            "CPC-кампании эту ручку не поддерживают."
+            "По умолчанию mode=add: при применении текущие минус-фразы выгружаются "
+            "заново, новые дописываются к ним, отправляется полный список и "
+            "результат проверяется обратным чтением. mode=remove — убрать фразы. "
+            "mode=replace заменяет список ЦЕЛИКОМ (пустой очищает все) — только "
+            "по явной просьбе. preview показывает, что изменится. "
+            "CPC не поддерживаются."
         ),
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
@@ -3369,25 +3416,34 @@ def create_server(
         if parsed is None:
             return _validation_error()
         arguments = _as_payload(parsed)
-        mode = arguments.pop("mode", "replace")
-        if mode != "replace":
-            pair = {
-                "campaign_id": arguments["campaign_id"],
-                "nm_id": arguments["nm_id"],
+        mode = str(arguments.pop("mode", "add"))
+        if mode == "replace":
+            return plan_tool("set_minus_phrases", arguments)
+        requested = _normalize_phrases(arguments["phrases"])
+        try:
+            existing = _current_minus_phrases(
+                arguments["campaign_id"], arguments["nm_id"]
+            )
+        except WBError as error:
+            return _gateway_error(error)
+        merged = _merge_phrases(existing, requested, mode)
+        if len(merged) > MINUS_PHRASES_LIMIT:
+            return _validation_error()
+        result = plan_tool(
+            "merge_minus_phrases", {**arguments, "phrases": requested, "mode": mode}
+        )
+        if result.get("ok") is not False:
+            result["preview"] = {
+                "current_count": len(existing),
+                "result_count": len(merged),
+                "changing": [
+                    q for q in requested if (q in existing) == (mode == "remove")
+                ],
+                "unchanged": [
+                    q for q in requested if (q in existing) != (mode == "remove")
+                ],
             }
-            current = read_tool("minus_phrases", {"items": [pair]})
-            if current.get("ok") is False:
-                return current
-            existing: list[str] = []
-            for item in as_list(current.get("items")):
-                existing = [str(q) for q in as_list(as_map(item).get("norm_queries"))]
-            requested = [str(q) for q in as_list(arguments["phrases"])]
-            if mode == "add":
-                merged = existing + [q for q in requested if q not in existing]
-            else:
-                merged = [q for q in existing if q not in requested]
-            arguments["phrases"] = merged
-        return plan_tool("set_minus_phrases", arguments)
+        return result
 
     @mcp.tool(
         name="wb_audit_campaigns",
@@ -3568,11 +3624,49 @@ def create_server(
             },
         }
 
+    def _apply_merge_minus(payload: Mapping[str, object]) -> dict[str, object]:
+        """Re-read current phrases at apply time, merge, write the full list, verify."""
+
+        campaign_id, nm_id = payload["campaign_id"], payload["nm_id"]
+        requested = [str(q) for q in as_list(payload.get("phrases"))]
+        mode = str(payload.get("mode"))
+        try:
+            existing = _current_minus_phrases(campaign_id, nm_id)
+            merged = _merge_phrases(existing, requested, mode)
+            if len(merged) > MINUS_PHRASES_LIMIT:
+                return _validation_error()
+            if merged != existing:
+                wb_gateway.write(
+                    "set_minus_phrases",
+                    {"campaign_id": campaign_id, "nm_id": nm_id, "phrases": merged},
+                )
+            stored = set(_current_minus_phrases(campaign_id, nm_id))
+        except WBError as error:
+            return _gateway_error(error)
+        missing = [q for q in merged if q not in stored]
+        leftover = [q for q in requested if q in stored] if mode == "remove" else []
+        return {
+            "ok": not missing and not leftover,
+            "status": "applied",
+            "operation": "merge_minus_phrases",
+            "result": {
+                "mode": mode,
+                "before_count": len(existing),
+                "after_count": len(stored),
+                "changed": [
+                    q for q in requested if (q in existing) == (mode == "remove")
+                ],
+            },
+            "verification": {"missing": missing, "not_removed": leftover},
+        }
+
     def _apply_one(confirmation_id: str) -> dict[str, object]:
         try:
             plan = plans.consume(confirmation_id)
         except ConfirmationError as error:
             return _confirmation_error(error)
+        if plan.operation == "merge_minus_phrases":
+            return _apply_merge_minus(plan.payload)
         try:
             result = wb_gateway.write(plan.operation, plan.payload)
         except WBError as error:
