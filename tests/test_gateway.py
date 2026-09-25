@@ -735,3 +735,53 @@ def test_cluster_reads_reject_more_than_the_documented_hundred_pairs() -> None:
         )
 
     assert caught.value.kind == "invalid_payload"
+
+
+def test_placements_map_to_advert_ids_and_booleans() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+
+    _, arguments = gateway._validated_arguments(
+        "update_placements",
+        {"campaigns": [{"campaign_id": 77, "search": False, "recommendations": True}]},
+        mutation=True,
+    )
+
+    request = arguments["adv_v0_auction_placements_put_request"]
+    body = getattr(request, "model_dump")(mode="json", by_alias=True)
+    assert body == {
+        "placements": [
+            {"advert_id": 77, "placements": {"search": False, "recommendations": True}}
+        ]
+    }
+
+
+def test_placements_refuse_to_switch_off_both_zones() -> None:
+    gateway = WildberriesGateway("test-token", clients={})
+    both_off = {"campaign_id": 77, "search": False, "recommendations": False}
+
+    with pytest.raises(WBError) as caught:
+        gateway.validate_write("update_placements", {"campaigns": [both_off]})
+
+    assert caught.value.kind == "invalid_payload"
+
+
+def test_fullstats_throttling_waits_long_enough_for_the_minute_limit() -> None:
+    attempts: list[int] = []
+
+    class RateLimitedError(Exception):
+        status = 429
+
+    class Promotion:
+        def adv_v1_promotion_count_get(self) -> dict[str, object]:
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise RateLimitedError
+            return {"adverts": []}
+
+    delays: list[float] = []
+    gateway = WildberriesGateway(
+        "test-token", clients={"promotion": Promotion()}, sleep=delays.append
+    )
+
+    gateway.read("campaign_counts", {})
+    assert delays == [20.0]

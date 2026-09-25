@@ -571,7 +571,12 @@ async def test_remaining_read_tools_route_only_to_named_gateway_operations(
         ),
         (
             "wb_plan_update_minus_phrases",
-            {"campaign_id": 1, "nm_id": 2, "phrases": ["нецелевой запрос"]},
+            {
+                "campaign_id": 1,
+                "nm_id": 2,
+                "phrases": ["нецелевой запрос"],
+                "mode": "replace",
+            },
             "set_minus_phrases",
         ),
         (
@@ -674,7 +679,14 @@ async def test_plan_update_minus_phrases_allows_an_empty_list_to_clear_them() ->
     ) as client:
         planned = await client.call_tool(
             "wb_plan_update_minus_phrases",
-            {"payload": {"campaign_id": 1, "nm_id": 2, "phrases": []}},
+            {
+                "payload": {
+                    "campaign_id": 1,
+                    "nm_id": 2,
+                    "phrases": [],
+                    "mode": "replace",
+                }
+            },
         )
 
         assert planned.isError is False

@@ -35,6 +35,9 @@ MAX_RAW_RESPONSE_BYTES: Final = 128 * 1024 * 1024
 RETRY_ATTEMPTS: Final = 3
 RETRY_BASE_DELAY_SECONDS: Final = 2.0
 _RETRYABLE_KINDS: Final = frozenset({"rate_limited", "service_unavailable"})
+# ponytail: WB allows ~1 call/min on fullstats; wait it out instead of erroring.
+SLOW_RATE_LIMIT_DELAY_SECONDS: Final = 20.0
+_SLOW_RATE_LIMIT_OPERATIONS: Final = frozenset({"campaign_stats", "campaign_counts"})
 _CARD_UPDATE_SNAPSHOT_FIELDS: Final = frozenset(
     {"brand", "title", "description", "dimensions", "characteristics"}
 )
@@ -919,6 +922,31 @@ def _adapt_set_minus_phrases(payload: Mapping[str, object]) -> Mapping[str, obje
     return {"v0_set_minus_norm_query_request": request}
 
 
+def _adapt_update_placements(payload: Mapping[str, object]) -> Mapping[str, object]:
+    _allow_only(payload, {"campaigns"})
+    rows: list[dict[str, object]] = []
+    for item in _require_list(payload, "campaigns"):
+        if not isinstance(item, Mapping):
+            raise ValueError("campaigns are invalid")
+        _allow_only(item, {"campaign_id", "search", "recommendations"})
+        search, recs = item.get("search"), item.get("recommendations")
+        if not isinstance(search, bool) or not isinstance(recs, bool):
+            raise ValueError("placements must be booleans")
+        if not (search or recs):
+            # ponytail: both off = silent stop; use wb_plan_update_campaign pause.
+            raise ValueError("at least one placement must stay enabled")
+        rows.append(
+            {
+                "advert_id": _require_int(item, "campaign_id"),
+                "placements": {"search": search, "recommendations": recs},
+            }
+        )
+    request = promotion.AdvV0AuctionPlacementsPutRequest.model_validate(
+        {"placements": rows}
+    )
+    return {"adv_v0_auction_placements_put_request": request}
+
+
 def _adapt_start_report(payload: Mapping[str, object]) -> Mapping[str, object]:
     _allow_only(payload, {"nm_ids", "date_from", "date_to", "name"})
     raw_name = payload.get("name")
@@ -1366,6 +1394,12 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
             mutation=True,
             payload_adapter=_adapt_set_minus_phrases,
         ),
+        "update_placements": Operation(
+            client="promotion",
+            method="adv_v0_auction_placements_put",
+            mutation=True,
+            payload_adapter=_adapt_update_placements,
+        ),
         "update_cluster_bids": Operation(
             client="promotion",
             method="adv_v0_normquery_bids_post",
@@ -1625,7 +1659,14 @@ class WildberriesGateway:
                 ):
                     raise wrapped from None
                 attempt += 1
-                self._sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+                slow = (
+                    wrapped.kind == "rate_limited"
+                    and operation_name in _SLOW_RATE_LIMIT_OPERATIONS
+                )
+                base = (
+                    SLOW_RATE_LIMIT_DELAY_SECONDS if slow else RETRY_BASE_DELAY_SECONDS
+                )
+                self._sleep(base * attempt)
 
     @staticmethod
     def _sdk_error(operation: str, error: Exception) -> WBError:

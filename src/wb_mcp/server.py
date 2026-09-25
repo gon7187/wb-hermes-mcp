@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
@@ -24,6 +25,8 @@ from pydantic import (
     model_validator,
 )
 
+from .audit import as_list, as_map
+from .audit import audit as run_audit
 from .changes import ChangePlan, ChangeStore, ConfirmationError
 from .gateway import WBError, WildberriesGateway
 
@@ -635,6 +638,14 @@ class ApplyChangeInput(PayloadModel):
     )
 
 
+class ApplyChangesInput(PayloadModel):
+    confirmation_ids: list[StrictStr] = Field(
+        min_length=1,
+        max_length=50,
+        description="Одноразовые ID планов, применяются по порядку.",
+    )
+
+
 class TariffsPayload(PayloadModel):
     kind: Literal["commission", "box", "pallet", "return", "acceptance"] = Field(
         default="commission",
@@ -681,6 +692,13 @@ class CampaignListPayload(PayloadModel):
     payment_type: Literal["cpm", "cpc"] | None = Field(
         default=None,
         description="Фильтр типа оплаты кампаний.",
+    )
+    view: Literal["summary", "full"] = Field(
+        default="summary",
+        description=(
+            "summary — id, статус, имя, тип оплаты/ставки, зоны, товары со ставками, "
+            "дата создания (по умолчанию); full — полный ответ WB."
+        ),
     )
 
 
@@ -764,10 +782,35 @@ class DateRangePayload(PayloadModel):
         return self
 
 
+class SpendHistoryPayload(DateRangePayload):
+    view: Literal["summary", "full"] = Field(
+        default="summary",
+        description=(
+            "summary — итоги по дням и по кампаниям (по умолчанию); "
+            "full — все списания/пополнения WB построчно."
+        ),
+    )
+
+
+class AuditPayload(DateRangePayload):
+    campaign_ids: list[StrictInt] | None = Field(
+        default=None,
+        max_length=100,
+        description="Необязательно: до 100 ID. По умолчанию все активные (статус 9).",
+    )
+
+
 class SearchClusterStatsPayload(DateRangePayload):
     items: list[CampaignBidsPayload] = Field(
         min_length=1, max_length=100,
         description="Пары campaign_id/nm_id, до 100 товаров кампаний.",
+    )
+    view: Literal["summary", "daily"] = Field(
+        default="summary",
+        description=(
+            "summary — итоги за период по каждому кластеру, по убыванию расхода "
+            "(по умолчанию); daily — полный ответ WB по дням."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1036,6 +1079,22 @@ class UpdateClusterBidsPayload(PayloadModel):
     )
 
 
+class CampaignPlacements(PayloadModel):
+    campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
+    search: StrictBool = Field(description="Показывать в поиске (и каталоге).")
+    recommendations: StrictBool = Field(
+        description="Показывать на полках рекомендаций."
+    )
+
+
+class UpdatePlacementsPayload(PayloadModel):
+    campaigns: list[CampaignPlacements] = Field(
+        min_length=1,
+        max_length=50,
+        description="Кампании и их зоны показа, до 50 за вызов.",
+    )
+
+
 class ResetClusterBid(PayloadModel):
     campaign_id: StrictInt = Field(description="ID кампании WB.", examples=[123456])
     nm_id: StrictInt = Field(description="Артикул WB в кампании.", examples=[987654321])
@@ -1055,8 +1114,25 @@ class ResetClusterBidsPayload(PayloadModel):
 class MinusPhrasesPayload(CampaignBidsPayload):
     phrases: list[StrictStr] = Field(
         max_length=1000,
-        description="Минус-фразы кампании; пустой список полностью очищает их.",
+        description=(
+            "Фразы для добавления/удаления; при mode=replace — весь новый список "
+            "(пустой очищает все)."
+        ),
     )
+    mode: Literal["add", "remove", "replace"] = Field(
+        default="add",
+        description=(
+            "add (по умолчанию) — дописать к текущим; remove — убрать из текущих; "
+            "replace — заменить список целиком. Для add/remove текущие минус-фразы "
+            "выгружаются заново в момент применения, чужие не теряются."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def phrases_for_merge(self) -> MinusPhrasesPayload:
+        if self.mode != "replace" and not self.phrases:
+            raise ValueError("add/remove need at least one phrase")
+        return self
 
 
 class StartReportPayload(NmDateRangePayload):
@@ -1196,6 +1272,31 @@ def _payload_input_schema(
     return schema
 
 
+def _strip_titles(schema: Any) -> Any:
+    """Drop Pydantic's auto titles: they repeat field names in every tool list."""
+
+    # ponytail: a property *named* "title" maps to a dict, so it survives.
+    if isinstance(schema, dict):
+        return {
+            key: _strip_titles(value)
+            for key, value in schema.items()
+            if not (key == "title" and isinstance(value, str))
+        }
+    if isinstance(schema, list):
+        return [_strip_titles(item) for item in schema]
+    return schema
+
+
+def _compact_result(result: Any) -> Any:
+    """Re-emit tool text as compact JSON; FastMCP pretty-prints with indent=2."""
+
+    # ponytail: ~40% fewer bytes per response; clients parse JSON, not layout.
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+        text = json.dumps(result[1], ensure_ascii=False, separators=(",", ":"))
+        return [mcp_types.TextContent(type="text", text=text)], result[1]
+    return result
+
+
 class SafeFastMCP(FastMCP):
     """FastMCP with an explicit raw-input boundary before Pydantic dispatch."""
 
@@ -1237,9 +1338,15 @@ class SafeFastMCP(FastMCP):
     async def list_tools(self) -> list[mcp_types.Tool]:
         tools = await super().list_tools()
         return [
-            tool.model_copy(update={"inputSchema": self._input_specs[tool.name].schema})
-            if tool.name in self._input_specs
-            else tool
+            tool.model_copy(
+                update={
+                    "inputSchema": _strip_titles(
+                        self._input_specs[tool.name].schema
+                        if tool.name in self._input_specs
+                        else tool.inputSchema
+                    )
+                }
+            )
             for tool in tools
         ]
 
@@ -1253,7 +1360,7 @@ class SafeFastMCP(FastMCP):
         if spec is not None and not self._valid_input(spec, arguments):
             return _safe_call_result(_validation_error())
         try:
-            return await super().call_tool(name, arguments)
+            return _compact_result(await super().call_tool(name, arguments))
         except Exception:
             return _safe_call_result(_execution_error())
 
@@ -1455,6 +1562,26 @@ def _confirmation_error(error: ConfirmationError) -> dict[str, object]:
     }
 
 
+MINUS_PHRASES_LIMIT: Final = 1000
+
+
+def _normalize_phrases(phrases: object) -> list[str]:
+    """WB stores normalized queries lower-case; dedupe while keeping order."""
+
+    seen: dict[str, None] = {}
+    for phrase in as_list(phrases):
+        text = " ".join(str(phrase).split()).lower()
+        if text:
+            seen.setdefault(text, None)
+    return list(seen)
+
+
+def _merge_phrases(existing: list[str], requested: list[str], mode: str) -> list[str]:
+    if mode == "add":
+        return existing + [q for q in requested if q not in existing]
+    return [q for q in existing if q not in requested]
+
+
 def _plan_result(plan: ChangePlan) -> dict[str, object]:
     return {
         "ok": True,
@@ -1611,6 +1738,32 @@ _PUBLIC_OPERATION_HELP: dict[str, dict[str, object]] = {
         "example": {"payload": {"date_from": "2026-07-01", "date_to": "2026-07-02"}},
         "mutation": False,
         "plan_then_apply": False,
+    },
+    "wb_audit_campaigns": {
+        "description": (
+            "Аудит активных РК за период: какой канал (поиск / реки+каталог) "
+            "оставить, кластеры-кандидаты в минус, слабые кампании. Только чтение."
+        ),
+        "required_payload_keys": ["date_from", "date_to"],
+        "example": {"payload": {"date_from": "2026-09-18", "date_to": "2026-09-24"}},
+        "mutation": False,
+        "plan_then_apply": False,
+    },
+    "wb_plan_update_placements": {
+        "description": (
+            "Планирует включение/выключение зон показа (поиск, рекомендации) у "
+            "CPM-кампаний с ручной ставкой. Хотя бы одна зона должна остаться."
+        ),
+        "required_payload_keys": ["campaigns"],
+        "example": {
+            "payload": {
+                "campaigns": [
+                    {"campaign_id": 123456, "search": False, "recommendations": True}
+                ]
+            }
+        },
+        "mutation": True,
+        "plan_then_apply": True,
     },
     "wb_plan_update_cluster_bids": {
         "description": (
@@ -2031,6 +2184,12 @@ _PUBLIC_OPERATION_HELP.update(
             {"confirmation_id": "confirmation-id"},
             mutation=True,
         ),
+        "wb_apply_changes": _public_help(
+            "Применяет несколько подтверждённых планов за один вызов.",
+            ["confirmation_ids"],
+            {"confirmation_ids": ["confirmation-id-1", "confirmation-id-2"]},
+            mutation=True,
+        ),
         "wb_describe_operation": _public_help(
             "Возвращает публичную справку об инструменте.",
             ["tool_name"],
@@ -2055,6 +2214,96 @@ _STOCK_SUMMARY_METRICS: tuple[str, ...] = (
     "stockSum",
     "availability",
 )
+
+
+def _campaign_summary(raw: object) -> dict[str, object]:
+    advert = as_map(raw)
+    settings = as_map(advert.get("settings"))
+    return {
+        "id": advert.get("id"),
+        "status": advert.get("status"),
+        "name": settings.get("name"),
+        "payment_type": settings.get("payment_type"),
+        "bid_type": advert.get("bid_type"),
+        "placements": settings.get("placements"),
+        "nms": [
+            {
+                "nm_id": as_map(nm).get("nm_id"),
+                "bids_kopecks": as_map(nm).get("bids_kopecks"),
+            }
+            for nm in as_list(advert.get("nm_settings"))
+        ],
+        "created": str(as_map(advert.get("timestamps")).get("created", ""))[:10],
+    }
+
+
+def _cluster_stats_view(result: dict[str, object], view: str) -> dict[str, object]:
+    """Collapse per-day cluster rows into one total per cluster."""
+
+    if view != "summary":
+        return result
+    keys = ("views", "clicks", "atbs", "orders", "spend")
+    items: list[dict[str, object]] = []
+    for raw_item in as_list(result.get("items")):
+        item = as_map(raw_item)
+        totals: dict[str, dict[str, float]] = {}
+        for day in as_list(item.get("dailyStats")):
+            stat = as_map(as_map(day).get("stat"))
+            if not stat:
+                continue
+            query = str(stat.get("normQuery", ""))
+            acc = totals.setdefault(query, dict.fromkeys(keys, 0.0))
+            for key in keys:
+                value = stat.get(key)
+                acc[key] += float(value) if isinstance(value, int | float) else 0.0
+        clusters: list[dict[str, object]] = []
+        for query, t in sorted(totals.items(), key=lambda kv: -kv[1]["spend"]):
+            clusters.append(
+                {
+                    "normQuery": query,
+                    **{k: int(t[k]) for k in keys if k != "spend"},
+                    "spend": round(t["spend"], 2),
+                    "ctr": (
+                        round(t["clicks"] / t["views"] * 100, 2) if t["views"] else 0
+                    ),
+                    "cpo": round(t["spend"] / t["orders"]) if t["orders"] else None,
+                }
+            )
+        items.append(
+            {
+                "advertId": item.get("advertId"),
+                "nmId": item.get("nmId"),
+                "clusters": clusters,
+            }
+        )
+    return {"items": items}
+
+
+def _spend_history_view(result: dict[str, object], view: str) -> dict[str, object]:
+    """Sum WB spend-history rows by day and by campaign."""
+
+    if view != "summary":
+        return result
+    by_day: dict[str, float] = {}
+    sums: dict[object, float] = {}
+    names: dict[object, object] = {}
+    for raw_row in as_list(result.get("data")):
+        row = as_map(raw_row)
+        value = row.get("updSum")
+        amount = float(value) if isinstance(value, int | float) else 0.0
+        day = str(row.get("updTime", ""))[:10]
+        by_day[day] = by_day.get(day, 0.0) + amount
+        advert_id = row.get("advertId")
+        sums[advert_id] = sums.get(advert_id, 0.0) + amount
+        names[advert_id] = row.get("campName")
+    return {
+        "total": round(sum(sums.values())),
+        "by_day": [{"date": d, "sum": round(v)} for d, v in sorted(by_day.items())],
+        "by_campaign": [
+            {"advertId": a, "campName": names[a], "sum": round(v)}
+            for a, v in sorted(sums.items(), key=lambda kv: -kv[1])
+        ],
+    }
 
 
 def _campaign_stats_view(result: dict[str, object], view: str) -> dict[str, object]:
@@ -2247,7 +2496,12 @@ def create_server(
         validator = getattr(wb_gateway, "validate_write", None)
         try:
             if callable(validator):
-                validator(operation, canonical_payload)
+                if operation == "merge_minus_phrases":
+                    # Server-side op: validated as the full-list write it becomes.
+                    shape = {k: v for k, v in canonical_payload.items() if k != "mode"}
+                    validator("set_minus_phrases", shape)
+                else:
+                    validator(operation, canonical_payload)
             return _plan_result(plans.create(operation, canonical_payload))
         except WBError as error:
             return _gateway_error(error)
@@ -2675,7 +2929,12 @@ def create_server(
         parsed = _parse_payload(payload, CampaignListPayload, optional=True)
         if parsed is None:
             return _validation_error()
-        return read_tool("list_campaigns", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        view = arguments.pop("view", "summary")
+        result = read_tool("list_campaigns", arguments)
+        if result.get("ok") is False or view != "summary":
+            return result
+        return {"adverts": [_campaign_summary(a) for a in as_list(result.get("adverts"))]}
 
     @mcp.tool(
         name="wb_get_campaign_counts",
@@ -2743,10 +3002,15 @@ def create_server(
         structured_output=True,
     )
     def wb_get_campaign_spend_history(payload: object = None) -> dict[str, object]:
-        parsed = _parse_payload(payload, DateRangePayload, optional=False)
+        parsed = _parse_payload(payload, SpendHistoryPayload, optional=False)
         if parsed is None:
             return _validation_error()
-        return read_tool("campaign_spend_history", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        view = str(arguments.pop("view", "summary"))
+        result = read_tool("campaign_spend_history", arguments)
+        if result.get("ok") is False:
+            return result
+        return _spend_history_view(result, view)
 
     @mcp.tool(
         name="wb_get_campaign_bids",
@@ -2801,7 +3065,12 @@ def create_server(
         parsed = _parse_payload(payload, SearchClusterStatsPayload, optional=False)
         if parsed is None:
             return _validation_error()
-        return read_tool("search_cluster_stats", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        view = str(arguments.pop("view", "summary"))
+        result = read_tool("search_cluster_stats", arguments)
+        if result.get("ok") is False:
+            return result
+        return _cluster_stats_view(result, view)
 
     @mcp.tool(
         name="wb_get_search_clusters",
@@ -3119,14 +3388,25 @@ def create_server(
             return _validation_error()
         return plan_tool("update_bids", _as_payload(parsed))
 
+    def _current_minus_phrases(campaign_id: object, nm_id: object) -> list[str]:
+        pair = {"campaign_id": campaign_id, "nm_id": nm_id}
+        current = wb_gateway.read("minus_phrases", {"items": [pair]})
+        for item in as_list(current.get("items")):
+            item = as_map(item)
+            if item.get("advert_id") == campaign_id:
+                return [str(q) for q in as_list(item.get("norm_queries"))]
+        return []
+
     @mcp.tool(
         name="wb_plan_update_minus_phrases",
         description=(
-            "Создаёт подтверждаемый план полной установки минус-фраз одного товара в "
-            "кампании WB. ВНИМАНИЕ: список заменяется ЦЕЛИКОМ, пустой список очищает "
-            "все минус-фразы. Сначала прочитайте текущие через wb_get_minus_phrases и "
-            "объедините их со своими, иначе чужие исключения будут потеряны. "
-            "CPC-кампании эту ручку не поддерживают."
+            "Создаёт подтверждаемый план минус-фраз одного товара в кампании WB. "
+            "По умолчанию mode=add: при применении текущие минус-фразы выгружаются "
+            "заново, новые дописываются к ним, отправляется полный список и "
+            "результат проверяется обратным чтением. mode=remove — убрать фразы. "
+            "mode=replace заменяет список ЦЕЛИКОМ (пустой очищает все) — только "
+            "по явной просьбе. preview показывает, что изменится. "
+            "CPC не поддерживаются."
         ),
         annotations=PLAN_ANNOTATIONS,
         structured_output=True,
@@ -3135,7 +3415,85 @@ def create_server(
         parsed = _parse_payload(payload, MinusPhrasesPayload, optional=False)
         if parsed is None:
             return _validation_error()
-        return plan_tool("set_minus_phrases", _as_payload(parsed))
+        arguments = _as_payload(parsed)
+        mode = str(arguments.pop("mode", "add"))
+        if mode == "replace":
+            return plan_tool("set_minus_phrases", arguments)
+        requested = _normalize_phrases(arguments["phrases"])
+        try:
+            existing = _current_minus_phrases(
+                arguments["campaign_id"], arguments["nm_id"]
+            )
+        except WBError as error:
+            return _gateway_error(error)
+        merged = _merge_phrases(existing, requested, mode)
+        if len(merged) > MINUS_PHRASES_LIMIT:
+            return _validation_error()
+        result = plan_tool(
+            "merge_minus_phrases", {**arguments, "phrases": requested, "mode": mode}
+        )
+        if result.get("ok") is not False:
+            result["preview"] = {
+                "current_count": len(existing),
+                "result_count": len(merged),
+                "changing": [
+                    q for q in requested if (q in existing) == (mode == "remove")
+                ],
+                "unchanged": [
+                    q for q in requested if (q in existing) != (mode == "remove")
+                ],
+            }
+        return result
+
+    @mcp.tool(
+        name="wb_audit_campaigns",
+        description=(
+            "Аудит рекламы WB за период (рекомендуется 7 дней), только чтение, ~30 сек. "
+            "Для каждой активной CPM-кампании с ручной ставкой и обеими зонами делит "
+            "расход на поиск (по статистике кластеров) и остальное (реки + каталог), "
+            "считает ДРР каналов и выдаёт verdict: disable_search / "
+            "disable_recommendations / keep_both / both_weak. suggested_placements "
+            "готов для wb_plan_update_placements. cluster_candidates — кластеры без "
+            "заказов с заметным расходом: перед исключением проверьте релевантность "
+            "(широкий или чужой запрос — в минус, свой с корзинами — оставить) и "
+            "дописывайте к текущим минус-фразам. campaign_flags — РК с ДРР > 25% или "
+            "без заказов. new=true — РК младше 7 дней, данных мало. Любые изменения "
+            "показывайте пользователю и применяйте только после подтверждения."
+        ),
+        annotations=READ_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_audit_campaigns(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, AuditPayload, optional=False)
+        if not isinstance(parsed, AuditPayload):
+            return _validation_error()
+        try:
+            return run_audit(
+                wb_gateway.read,
+                parsed.date_from,
+                parsed.date_to,
+                parsed.campaign_ids,
+            )
+        except WBError as error:
+            return _gateway_error(error)
+
+    @mcp.tool(
+        name="wb_plan_update_placements",
+        description=(
+            "Создаёт подтверждаемый план включения/выключения зон показа WB: поиск "
+            "(вместе с каталогом) и рекомендации. Только CPM-кампании с ручной ставкой "
+            "в статусах 4/9/11; единая ставка и CPC не поддерживаются. Выключить обе "
+            "зоны нельзя — для этого пауза через wb_plan_update_campaign. До 50 "
+            "кампаний за вызов; лимит WB — 1 запрос в секунду."
+        ),
+        annotations=PLAN_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_plan_update_placements(payload: object = None) -> dict[str, object]:
+        parsed = _parse_payload(payload, UpdatePlacementsPayload, optional=False)
+        if parsed is None:
+            return _validation_error()
+        return plan_tool("update_placements", _as_payload(parsed))
 
     @mcp.tool(
         name="wb_plan_update_cluster_bids",
@@ -3266,26 +3624,49 @@ def create_server(
             },
         }
 
-    @mcp.tool(
-        name="wb_apply_change",
-        description=(
-            "Однократно применяет ранее созданный план по confirmation_id. После попытки "
-            "план расходуется, даже если WB вернул ошибку."
-        ),
-        annotations=APPLY_ANNOTATIONS,
-        structured_output=True,
-    )
-    def wb_apply_change(confirmation_id: object = None) -> dict[str, object]:
-        parsed = _parse_payload(
-            {"confirmation_id": confirmation_id}, ApplyChangeInput, optional=False
-        )
-        if parsed is None:
-            return _validation_error()
-        apply_input = cast(ApplyChangeInput, parsed)
+    def _apply_merge_minus(payload: Mapping[str, object]) -> dict[str, object]:
+        """Re-read current phrases at apply time, merge, write the full list, verify."""
+
+        campaign_id, nm_id = payload["campaign_id"], payload["nm_id"]
+        requested = [str(q) for q in as_list(payload.get("phrases"))]
+        mode = str(payload.get("mode"))
         try:
-            plan = plans.consume(apply_input.confirmation_id)
+            existing = _current_minus_phrases(campaign_id, nm_id)
+            merged = _merge_phrases(existing, requested, mode)
+            if len(merged) > MINUS_PHRASES_LIMIT:
+                return _validation_error()
+            if merged != existing:
+                wb_gateway.write(
+                    "set_minus_phrases",
+                    {"campaign_id": campaign_id, "nm_id": nm_id, "phrases": merged},
+                )
+            stored = set(_current_minus_phrases(campaign_id, nm_id))
+        except WBError as error:
+            return _gateway_error(error)
+        missing = [q for q in merged if q not in stored]
+        leftover = [q for q in requested if q in stored] if mode == "remove" else []
+        return {
+            "ok": not missing and not leftover,
+            "status": "applied",
+            "operation": "merge_minus_phrases",
+            "result": {
+                "mode": mode,
+                "before_count": len(existing),
+                "after_count": len(stored),
+                "changed": [
+                    q for q in requested if (q in existing) == (mode == "remove")
+                ],
+            },
+            "verification": {"missing": missing, "not_removed": leftover},
+        }
+
+    def _apply_one(confirmation_id: str) -> dict[str, object]:
+        try:
+            plan = plans.consume(confirmation_id)
         except ConfirmationError as error:
             return _confirmation_error(error)
+        if plan.operation == "merge_minus_phrases":
+            return _apply_merge_minus(plan.payload)
         try:
             result = wb_gateway.write(plan.operation, plan.payload)
         except WBError as error:
@@ -3303,6 +3684,56 @@ def create_server(
             if verification is not None:
                 response["verification"] = verification
         return response
+
+    @mcp.tool(
+        name="wb_apply_change",
+        description=(
+            "Однократно применяет ранее созданный план по confirmation_id. После попытки "
+            "план расходуется, даже если WB вернул ошибку."
+        ),
+        annotations=APPLY_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_apply_change(confirmation_id: object = None) -> dict[str, object]:
+        parsed = _parse_payload(
+            {"confirmation_id": confirmation_id}, ApplyChangeInput, optional=False
+        )
+        if parsed is None:
+            return _validation_error()
+        return _apply_one(cast(ApplyChangeInput, parsed).confirmation_id)
+
+    @mcp.tool(
+        name="wb_apply_changes",
+        description=(
+            "Применяет до 50 подтверждённых планов за один вызов, по порядку, с паузой "
+            "~1 с между записями (лимиты WB). Каждый план расходуется независимо; "
+            "results — ответ по каждому ID в том же порядке."
+        ),
+        annotations=APPLY_ANNOTATIONS,
+        structured_output=True,
+    )
+    def wb_apply_changes(confirmation_ids: object = None) -> dict[str, object]:
+        parsed = _parse_payload(
+            {"confirmation_ids": confirmation_ids}, ApplyChangesInput, optional=False
+        )
+        if parsed is None:
+            return _validation_error()
+        results: list[dict[str, object]] = []
+        for index, confirmation_id in enumerate(
+            cast(ApplyChangesInput, parsed).confirmation_ids
+        ):
+            if index:
+                # ponytail: fixed 1.1 s gap fits WB's 1 rps write limits; no queue.
+                time.sleep(1.1)
+            outcome = _apply_one(confirmation_id)
+            results.append({"confirmation_id": confirmation_id, **outcome})
+        applied = sum(1 for r in results if r.get("ok") is True)
+        return {
+            "ok": applied == len(results),
+            "applied": applied,
+            "failed": len(results) - applied,
+            "results": results,
+        }
 
     mcp.register_payload_input("wb_get_seller_profile", EmptyPayload, required=False)
     mcp.register_payload_input("wb_get_tariffs", TariffsPayload, required=False)
@@ -3353,7 +3784,7 @@ def create_server(
         "wb_get_campaign_stats", CampaignStatsPayload, required=True
     )
     mcp.register_payload_input(
-        "wb_get_campaign_spend_history", DateRangePayload, required=True
+        "wb_get_campaign_spend_history", SpendHistoryPayload, required=True
     )
     mcp.register_payload_input(
         "wb_get_campaign_bids", CampaignBidsPayload, required=True
@@ -3377,6 +3808,10 @@ def create_server(
     mcp.register_payload_input("wb_get_adv_balance", EmptyPayload, required=False)
     mcp.register_payload_input(
         "wb_get_budget_deposits", DateRangePayload, required=True
+    )
+    mcp.register_payload_input("wb_audit_campaigns", AuditPayload, required=True)
+    mcp.register_payload_input(
+        "wb_plan_update_placements", UpdatePlacementsPayload, required=True
     )
     mcp.register_payload_input(
         "wb_plan_update_cluster_bids", UpdateClusterBidsPayload, required=True
@@ -3439,6 +3874,7 @@ def create_server(
     )
     mcp.register_root_input("wb_describe_operation", DescribeOperationInput)
     mcp.register_root_input("wb_apply_change", ApplyChangeInput)
+    mcp.register_root_input("wb_apply_changes", ApplyChangesInput)
 
     return mcp
 

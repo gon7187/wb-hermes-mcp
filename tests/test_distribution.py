@@ -41,7 +41,7 @@ async def test_stdio_entrypoint_performs_mcp_handshake_and_advertises_tools() ->
         stderr_output = stderr.read()
 
     names = {tool.name for tool in tools.tools}
-    assert len(names) == 63
+    assert len(names) == 66
     assert "wb_get_search_cluster_stats" in names
     assert {
         "wb_get_seller_profile",
