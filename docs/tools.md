@@ -79,7 +79,7 @@ iOS), которую вызывающая сторона всё равно су�
 | `wb_get_minimum_campaign_bids` | Минимальные ставки товаров по зонам размещения. |
 | `wb_get_campaign_budget` | Бюджет кампании. |
 | `wb_get_search_clusters` | Нормализованные поисковые кластеры. |
-| `wb_get_minus_phrases` | Текущие минус-фразы; читать перед `wb_plan_update_minus_phrases`. |
+| `wb_get_minus_phrases` | Текущие минус-фразы (для просмотра; `wb_plan_update_minus_phrases` в режиме add/remove читает их сам). |
 | `wb_get_cluster_bids` | Персональные ставки кластеров (в рублях за 1000 показов). |
 | `wb_get_adv_balance` | Рекламный баланс: счёт, баланс, бонусы. |
 | `wb_get_budget_deposits` | История пополнений рекламных бюджетов за период до 31 дня. |
